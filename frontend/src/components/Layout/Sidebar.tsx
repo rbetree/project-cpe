@@ -2,11 +2,11 @@
  * @Author: 1orz cloudorzi@gmail.com
  * @Date: 2025-12-10 09:19:05
  * @LastEditors: 1orz cloudorzi@gmail.com
- * @LastEditTime: 2025-12-13 12:43:08
+ * @LastEditTime: 2026-04-18 00:00:00
  * @FilePath: /udx710-backend/frontend/src/components/Layout/Sidebar.tsx
- * @Description: 
- * 
- * Copyright (c) 2025 by 1orz, All Rights Reserved. 
+ * @Description:
+ *
+ * Copyright (c) 2025 by 1orz, All Rights Reserved.
  */
 import { useNavigate, useLocation } from 'react-router-dom'
 import {
@@ -33,6 +33,7 @@ import {
   GitHub as GitHubIcon,
   WebAsset as WebTerminalIcon,
   SystemUpdateAlt as OtaIcon,
+  RocketLaunch as InitScriptIcon,
 } from '@mui/icons-material'
 
 interface SidebarProps {
@@ -43,7 +44,6 @@ interface SidebarProps {
   isMobile: boolean
 }
 
-// 导航菜单项（已整合网络接口和频段锁定到网络状态）
 const menuItems = [
   { path: '/', label: '仪表盘', icon: DashboardIcon },
   { path: '/device', label: '设备信息', icon: DevicesIcon },
@@ -51,9 +51,10 @@ const menuItems = [
   { path: '/phone', label: '电话管理', icon: PhoneIcon },
   { path: '/sms', label: '短信管理', icon: SmsIcon },
   { path: '/config', label: '系统配置', icon: SettingsIcon },
+  { path: '/init-script', label: '开机脚本', icon: InitScriptIcon },
   { path: '/ota', label: 'OTA 更新', icon: OtaIcon },
-  { path: '/at-console', label: 'AT控制台', icon: TerminalIcon },
-  { path: '/terminal', label: 'Web终端', icon: WebTerminalIcon },
+  { path: '/at-console', label: 'AT 控制台', icon: TerminalIcon },
+  { path: '/terminal', label: 'Web 终端', icon: WebTerminalIcon },
 ]
 
 export default function Sidebar({ drawerWidth, mobileOpen, desktopOpen, onClose, isMobile }: SidebarProps) {
@@ -95,7 +96,6 @@ export default function Sidebar({ drawerWidth, mobileOpen, desktopOpen, onClose,
           )
         })}
       </List>
-      {/* Footer with copyright */}
       <Box sx={{ p: 2, borderTop: 1, borderColor: 'divider' }}>
         <Link
           href="https://github.com/1orz/project-cpe"
@@ -131,19 +131,18 @@ export default function Sidebar({ drawerWidth, mobileOpen, desktopOpen, onClose,
   return (
     <Box
       component="nav"
-      sx={{ 
+      sx={{
         width: { xs: 0, sm: desktopOpen ? drawerWidth : 0 },
         flexShrink: { sm: 0 },
         transition: 'width 0.3s',
       }}
     >
-      {/* 移动端抽屉 */}
       <Drawer
         variant="temporary"
         open={mobileOpen}
         onClose={onClose}
         ModalProps={{
-          keepMounted: true, // 提升移动端性能
+          keepMounted: true,
         }}
         sx={{
           display: { xs: 'block', sm: 'none' },
@@ -156,7 +155,6 @@ export default function Sidebar({ drawerWidth, mobileOpen, desktopOpen, onClose,
         {drawer}
       </Drawer>
 
-      {/* 桌面端可折叠抽屉 */}
       <Drawer
         variant="persistent"
         open={desktopOpen}
@@ -174,4 +172,3 @@ export default function Sidebar({ drawerWidth, mobileOpen, desktopOpen, onClose,
     </Box>
   )
 }
-

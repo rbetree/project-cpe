@@ -8,7 +8,7 @@
  * 
  * Copyright (c) 2025 by 1orz, All Rights Reserved. 
  */
-import { useEffect, useState, type ChangeEvent } from 'react'
+import { useCallback, useEffect, useRef, useState, type ChangeEvent } from 'react'
 import {
   Box,
   Typography,
@@ -146,13 +146,13 @@ export default function NetworkPage() {
     auth_method: 'chap',
   })
   const [apnSaving, setApnSaving] = useState(false)
-  const [apnInitialized, setApnInitialized] = useState(false) // 控制 APN 只初始化一次
+  const apnInitializedRef = useRef(false) // 控制 APN 只初始化一次
   
   // 频段配置刷新中
   const [bandConfigRefreshing, setBandConfigRefreshing] = useState(false)
 
   // 加载频段锁定配置（只在首次加载和手动刷新时调用，自动刷新不调用）
-  const loadBandLockConfig = async () => {
+  const loadBandLockConfig = useCallback(async () => {
     try {
       setBandConfigRefreshing(true)
       const [radioModeRes, bandLockRes] = await Promise.all([
@@ -199,10 +199,10 @@ export default function NetworkPage() {
     } finally {
       setBandConfigRefreshing(false)
     }
-  }
+  }, [])
 
   // 加载其他数据（自动刷新时调用，不包含频段锁定配置）
-  const loadData = async () => {
+  const loadData = useCallback(async () => {
     setError(null)
     
     try {
@@ -224,7 +224,7 @@ export default function NetworkPage() {
       if (apnRes.data?.contexts) {
         setApnContexts(apnRes.data.contexts)
         // 只在首次加载时初始化 APN 表单，避免覆盖用户输入
-        if (!apnInitialized) {
+        if (!apnInitializedRef.current) {
           const activeContext = apnRes.data.contexts.find(c => c.apn) || apnRes.data.contexts[0]
           if (activeContext) {
             setSelectedContext(activeContext.path)
@@ -236,7 +236,7 @@ export default function NetworkPage() {
               auth_method: activeContext.auth_method,
             })
           }
-          setApnInitialized(true)
+          apnInitializedRef.current = true
         }
       }
     } catch (err) {
@@ -244,15 +244,15 @@ export default function NetworkPage() {
     } finally {
       setInitialLoading(false)
     }
-  }
+  }, [])
 
   // 首次加载：加载所有数据（包括频段配置）
-  const loadAllData = async () => {
+  const loadAllData = useCallback(async () => {
     await Promise.all([
       loadData(),
       loadBandLockConfig(),
     ])
-  }
+  }, [loadBandLockConfig, loadData])
 
   // 手动刷新频段配置
   const handleRefreshBandConfig = () => {
@@ -615,8 +615,7 @@ export default function NetworkPage() {
       }, refreshInterval)
       return () => clearInterval(interval)
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [refreshInterval, refreshKey])
+  }, [loadAllData, loadData, refreshInterval, refreshKey])
 
   const handleTabChange = (_event: React.SyntheticEvent, newValue: number) => {
     setTabValue(newValue)

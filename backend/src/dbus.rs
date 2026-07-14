@@ -13,14 +13,18 @@
 //! 处理与 ofono D-Bus 服务的通信
 
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
 use tracing::{info, warn};
 use zbus::{proxy, zvariant::OwnedValue, Connection, Proxy};
 
+use crate::config::ConfigManager;
 use crate::models::{
     AirplaneModeResponse, ApnContext, DeviceInfoResponse, NetworkInfoResponse, QosInfoResponse, RadioMode,
     RadioModeResponse, ServingCell, SimInfoResponse,
 };
 use crate::serial::with_serial;
+use crate::state::FrontendRuntime;
 
 /// ofono NetworkMonitor 代理接口
 #[proxy(
@@ -722,14 +726,26 @@ async fn check_and_restore_data_connection(conn: &Connection) -> String {
 /// # Arguments
 /// * `conn` - D-Bus 连接
 /// * `interval_secs` - 检查间隔（秒）
-pub async fn data_connection_watchdog(conn: std::sync::Arc<Connection>, interval_secs: u64) {
+pub async fn data_connection_watchdog(
+    conn: Arc<Connection>,
+    config_manager: Arc<ConfigManager>,
+    frontend_runtime: Arc<FrontendRuntime>,
+) {
     use crate::iptables::{flush_iptables, get_iptables_rule_count};
     
     let mut last_data_log = String::new();
     let mut last_iptables_action = false; // 上次是否清空了 iptables
     
     loop {
-        tokio::time::sleep(tokio::time::Duration::from_secs(interval_secs)).await;
+        let refresh = config_manager.get_refresh();
+        let heartbeat_timeout = Duration::from_millis(refresh.heartbeat_timeout_ms());
+        let interval = if frontend_runtime.is_recent(heartbeat_timeout) {
+            Duration::from_millis(refresh.active_watchdog_interval_ms())
+        } else {
+            Duration::from_millis(refresh.idle_watchdog_interval_ms())
+        };
+
+        tokio::time::sleep(interval).await;
         
         // 1. 检查并清空 iptables 规则
         match get_iptables_rule_count().await {

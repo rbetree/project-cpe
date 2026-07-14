@@ -23,6 +23,7 @@ use std::sync::Arc;
 use zbus::Connection;
 
 use crate::{
+    config::{ConfigManager, RefreshConfig},
     dbus::{
         get_airplane_mode, get_all_apn_contexts, get_data_connection_status, get_device_info_data,
         get_network_info_data, get_qos_info_data, get_radio_mode, get_roaming_status, get_serving_cell_info,
@@ -41,6 +42,7 @@ use crate::{
         read_uptime, sample_cpu_usage,
     },
 };
+use crate::state::FrontendRuntime;
 use std::process::Command;
 
 /// 处理 OPTIONS 请求（CORS 预检）
@@ -2593,7 +2595,7 @@ fn parse_ping_latency(output: &str) -> Option<f64> {
 
 // ============ 通话记录 API ============
 
-use crate::config::ConfigManager;
+use crate::sms_push::SmsPushSender;
 use crate::webhook::WebhookSender;
 
 /// GET /api/call/history - 获取通话记录
@@ -2651,6 +2653,45 @@ pub async fn clear_call_history_handler(
         Err(e) => (
             StatusCode::OK,
             Json(ApiResponse::error(format!("Failed to clear call history: {}", e))),
+        ),
+    }
+}
+
+// ============ init.sh 管理 API ============
+
+/// GET /api/init-script - Get init.sh content and loader hook status.
+pub async fn get_init_script_handler(
+) -> (StatusCode, Json<ApiResponse<crate::models::InitScriptResponse>>) {
+    match crate::config::get_init_script() {
+        Ok(script) => (
+            StatusCode::OK,
+            Json(ApiResponse::success_with_message("Success", script)),
+        ),
+        Err(e) => (
+            StatusCode::OK,
+            Json(ApiResponse::<crate::models::InitScriptResponse>::error(format!(
+                "Failed to get init script: {}",
+                e
+            ))),
+        ),
+    }
+}
+
+/// POST /api/init-script - Save init.sh content and ensure loader.sh calls it.
+pub async fn set_init_script_handler(
+    Json(req): Json<crate::models::SetInitScriptRequest>,
+) -> (StatusCode, Json<ApiResponse<crate::models::InitScriptResponse>>) {
+    match crate::config::set_init_script(req.script) {
+        Ok(script) => (
+            StatusCode::OK,
+            Json(ApiResponse::success_with_message("init.sh updated", script)),
+        ),
+        Err(e) => (
+            StatusCode::OK,
+            Json(ApiResponse::<crate::models::InitScriptResponse>::error(format!(
+                "Failed to update init script: {}",
+                e
+            ))),
         ),
     }
 }
@@ -2713,9 +2754,138 @@ pub async fn test_webhook_handler(
     }
 }
 
+/// GET /api/sms-push/config - 获取短信推送配置
+pub async fn get_sms_push_config_handler(
+    State(config_manager): State<Arc<ConfigManager>>,
+) -> (StatusCode, Json<ApiResponse<crate::config::SmsPushConfig>>) {
+    let config = config_manager.get_sms_push();
+    (
+        StatusCode::OK,
+        Json(ApiResponse::success_with_message("Success", config)),
+    )
+}
+
+/// POST /api/sms-push/config - 设置短信推送配置
+pub async fn set_sms_push_config_handler(
+    State(config_manager): State<Arc<ConfigManager>>,
+    Json(sms_push_config): Json<crate::config::SmsPushConfig>,
+) -> (StatusCode, Json<ApiResponse<serde_json::Value>>) {
+    match config_manager.set_sms_push(sms_push_config) {
+        Ok(_) => (
+            StatusCode::OK,
+            Json(ApiResponse::success_with_message("SMS push config updated", json!({}))),
+        ),
+        Err(e) => (
+            StatusCode::OK,
+            Json(ApiResponse::error(format!("Failed to update SMS push config: {}", e))),
+        ),
+    }
+}
+
+/// POST /api/sms-push/test - 测试短信推送连接
+pub async fn test_sms_push_handler(
+    State(sms_push_sender): State<Arc<SmsPushSender>>,
+) -> (StatusCode, Json<ApiResponse<crate::models::WebhookTestResponse>>) {
+    match sms_push_sender.test_sms_push().await {
+        Ok(message) => (
+            StatusCode::OK,
+            Json(ApiResponse::success_with_message(
+                "SMS push test successful",
+                crate::models::WebhookTestResponse {
+                    success: true,
+                    message,
+                },
+            )),
+        ),
+        Err(e) => (
+            StatusCode::OK,
+            Json(ApiResponse::success_with_message(
+                "SMS push test failed",
+                crate::models::WebhookTestResponse {
+                    success: false,
+                    message: e,
+                },
+            )),
+        ),
+    }
+}
+
 // ============ OTA 更新功能 ============
 
 /// GET /api/ota/status - 获取 OTA 更新状态
+pub async fn get_refresh_config_handler(
+    State(config_manager): State<Arc<ConfigManager>>,
+    State(frontend_runtime): State<Arc<FrontendRuntime>>,
+) -> (StatusCode, Json<ApiResponse<crate::models::RefreshConfigResponse>>) {
+    let refresh = config_manager.get_refresh();
+    let response = crate::models::RefreshConfigResponse {
+        interval_ms: refresh.interval_ms,
+        watchdog_active_interval_ms: refresh.active_watchdog_interval_ms(),
+        watchdog_idle_interval_ms: refresh.idle_watchdog_interval_ms(),
+        heartbeat_timeout_ms: refresh.heartbeat_timeout_ms(),
+        frontend_connected: frontend_runtime
+            .is_recent(std::time::Duration::from_millis(refresh.heartbeat_timeout_ms())),
+    };
+
+    (
+        StatusCode::OK,
+        Json(ApiResponse::success_with_message("Success", response)),
+    )
+}
+
+pub async fn set_refresh_config_handler(
+    State(config_manager): State<Arc<ConfigManager>>,
+    State(frontend_runtime): State<Arc<FrontendRuntime>>,
+    Json(refresh): Json<RefreshConfig>,
+) -> (StatusCode, Json<ApiResponse<crate::models::RefreshConfigResponse>>) {
+    let refresh = refresh.sanitize();
+
+    match config_manager.set_refresh(refresh.clone()) {
+        Ok(_) => {
+            let response = crate::models::RefreshConfigResponse {
+                interval_ms: refresh.interval_ms,
+                watchdog_active_interval_ms: refresh.active_watchdog_interval_ms(),
+                watchdog_idle_interval_ms: refresh.idle_watchdog_interval_ms(),
+                heartbeat_timeout_ms: refresh.heartbeat_timeout_ms(),
+                frontend_connected: frontend_runtime
+                    .is_recent(std::time::Duration::from_millis(refresh.heartbeat_timeout_ms())),
+            };
+
+            (
+                StatusCode::OK,
+                Json(ApiResponse::success_with_message("Refresh config updated", response)),
+            )
+        }
+        Err(error) => (
+            StatusCode::OK,
+            Json(ApiResponse::error(format!(
+                "Failed to update refresh config: {}",
+                error
+            ))),
+        ),
+    }
+}
+
+pub async fn frontend_refresh_heartbeat_handler(
+    State(config_manager): State<Arc<ConfigManager>>,
+    State(frontend_runtime): State<Arc<FrontendRuntime>>,
+) -> (StatusCode, Json<ApiResponse<crate::models::RefreshConfigResponse>>) {
+    frontend_runtime.mark_seen();
+    let refresh = config_manager.get_refresh();
+    let response = crate::models::RefreshConfigResponse {
+        interval_ms: refresh.interval_ms,
+        watchdog_active_interval_ms: refresh.active_watchdog_interval_ms(),
+        watchdog_idle_interval_ms: refresh.idle_watchdog_interval_ms(),
+        heartbeat_timeout_ms: refresh.heartbeat_timeout_ms(),
+        frontend_connected: true,
+    };
+
+    (
+        StatusCode::OK,
+        Json(ApiResponse::success_with_message("Refresh heartbeat accepted", response)),
+    )
+}
+
 pub async fn get_ota_status_handler() -> impl IntoResponse {
     let status = crate::ota::get_ota_status();
     (

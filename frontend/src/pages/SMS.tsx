@@ -46,6 +46,7 @@ import {
   DeleteSweep,
 } from '@mui/icons-material'
 import { api, type SmsMessage, type SmsStats } from '../api'
+import { useRefreshInterval } from '../contexts/RefreshContext'
 
 interface ConversationGroup {
   phoneNumber: string
@@ -56,6 +57,7 @@ interface ConversationGroup {
 
 export default function SMSPage() {
   const isMobile = useMediaQuery<Theme>((theme: Theme) => theme.breakpoints.down('md'))
+  const { refreshInterval, refreshKey } = useRefreshInterval()
   
   const [messages, setMessages] = useState<SmsMessage[]>([])
   const [stats, setStats] = useState<SmsStats | null>(null)
@@ -173,16 +175,20 @@ export default function SMSPage() {
   useEffect(() => {
     void fetchMessages()
     void fetchStats()
-    const interval = setInterval(() => {
+    if (refreshInterval <= 0) {
+      return undefined
+    }
+
+    const interval = window.setInterval(() => {
       // 输入框有焦点时跳过刷新，避免失焦问题
       if (inputFocusedRef.current) {
         return
       }
       void fetchMessages()
       void fetchStats()
-    }, 10000)
-    return () => clearInterval(interval)
-  }, [fetchMessages, fetchStats])
+    }, refreshInterval)
+    return () => window.clearInterval(interval)
+  }, [fetchMessages, fetchStats, refreshInterval, refreshKey])
 
   // 选择对话
   const handleSelectConversation = (phone: string) => {

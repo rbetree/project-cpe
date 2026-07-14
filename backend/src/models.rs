@@ -1084,6 +1084,24 @@ pub struct DeleteCallRequest {
     pub id: i64,
 }
 
+// ============ init.sh 管理模型 ============
+
+/// init.sh 内容响应
+#[derive(Debug, Serialize, Default)]
+pub struct InitScriptResponse {
+    pub script: String,
+    pub init_path: String,
+    pub loader_path: String,
+    pub loader_hooked: bool,
+}
+
+/// 设置 init.sh 内容请求
+#[derive(Debug, Deserialize, Default)]
+pub struct SetInitScriptRequest {
+    #[serde(default)]
+    pub script: String,
+}
+
 // ============ Webhook 配置模型 ============
 
 /// Webhook 测试结果
@@ -1091,6 +1109,15 @@ pub struct DeleteCallRequest {
 pub struct WebhookTestResponse {
     pub success: bool,
     pub message: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default)]
+pub struct RefreshConfigResponse {
+    pub interval_ms: u64,
+    pub watchdog_active_interval_ms: u64,
+    pub watchdog_idle_interval_ms: u64,
+    pub heartbeat_timeout_ms: u64,
+    pub frontend_connected: bool,
 }
 
 // ============ OTA 更新模型 ============

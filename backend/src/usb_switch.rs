@@ -32,7 +32,6 @@
 //! | 1    | NCM    | 0x1782 | 0x4040 | Yes | NCM + 调试接口 |
 //! | 2    | ECM    | 0x1782 | 0x4039 | Yes | ECM + 调试接口 |
 //! | 3    | RNDIS  | 0x1782 | 0x4038 | Yes | RNDIS + 调试接口 |
-//! | 4    | NCM    | 0x3426 | 0x2999 | No  | 纯 NCM 模式 |
 
 use std::fs;
 use std::io::{self, Write};
@@ -517,15 +516,15 @@ pub fn switch_usb_mode_advanced(mode: u8) -> Result<(), String> {
     
     // 14. 创建符号链接（始终使用多功能模式，包含 ADB 和调试接口）
     create_multi_function_links(&config)?;
-    
+
     // 15. 启动 adbd（始终启动）
     // adbd-init 会挂载 functionfs 到 /dev/usb-ffs/adb
     let _ = start_adbd();
-    
+
     // 16. 等待 functionfs 挂载完成
     // adbd-init 是后台启动的，需要等待 functionfs 挂载完成后才能启用 UDC
     wait_for_functionfs_mount()?;
-    
+
     // 17. 设置日志传输
     let _ = set_log_transport(true);
     
@@ -601,9 +600,6 @@ fn create_multi_function_links(config: &UsbModeConfig) -> Result<(), String> {
     
     Ok(())
 }
-
-
-/// 获取 UDC 名称
 fn get_udc_name() -> String {
     if let Ok(entries) = fs::read_dir("/sys/class/udc") {
         entries
@@ -823,12 +819,11 @@ pub fn get_current_usb_mode() -> Result<UsbModeResult, String> {
         .map_err(|e| format!("Failed to read VID: {}", e))?
         .trim()
         .to_lowercase();
-    
     let pid = fs::read_to_string(format!("{}/idProduct", GADGET_PATH))
         .map_err(|e| format!("Failed to read PID: {}", e))?
         .trim()
         .to_lowercase();
-    
+
     // 根据 VID:PID 判断模式
     match (vid.as_str(), pid.as_str()) {
         ("0x1782", "0x4040") => Ok(UsbModeResult { mode: 1 }), // NCM
@@ -839,7 +834,6 @@ pub fn get_current_usb_mode() -> Result<UsbModeResult, String> {
         ("0x1782", "0x4105") => Ok(UsbModeResult { mode: 1 }), // NCM2
         ("0x1782", "0x4103") => Ok(UsbModeResult { mode: 1 }), // NCM3
         ("0x1782", "0x4101") => Ok(UsbModeResult { mode: 1 }), // NCM4
-        ("0x3426", "0x2999") => Ok(UsbModeResult { mode: 1 }), // NCM 其他变体
         // 其他可能的 ECM PID
         ("0x1782", "0x4106") => Ok(UsbModeResult { mode: 2 }), // ECM1
         ("0x1782", "0x4104") => Ok(UsbModeResult { mode: 2 }), // ECM2

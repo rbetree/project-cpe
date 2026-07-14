@@ -4,9 +4,9 @@
  * @LastEditors: 1orz cloudorzi@gmail.com
  * @LastEditTime: 2025-12-13 12:44:38
  * @FilePath: /udx710-backend/frontend/src/pages/Dashboard/components/TemperatureMonitor.tsx
- * @Description: 
- * 
- * Copyright (c) 2025 by 1orz, All Rights Reserved. 
+ * @Description:
+ *
+ * Copyright (c) 2025 by 1orz, All Rights Reserved.
  */
 import { Box, Card, CardContent, Typography, Paper } from '@mui/material'
 import Grid from '@mui/material/Grid'
@@ -24,7 +24,9 @@ export function TemperatureMonitor({ systemStats }: TemperatureMonitorProps) {
       <CardContent>
         <Box display="flex" alignItems="center" gap={1} mb={2}>
           <Thermostat color="primary" />
-          <Typography variant="subtitle2" color="text.secondary">温度监控</Typography>
+          <Typography variant="subtitle2" color="text.secondary">
+            温度监控
+          </Typography>
         </Box>
         {systemStats?.temperature && systemStats.temperature.length > 0 ? (
           <Grid container spacing={1}>
@@ -34,11 +36,7 @@ export function TemperatureMonitor({ systemStats }: TemperatureMonitorProps) {
                   <Typography variant="caption" color="text.secondary" display="block" noWrap>
                     {sensor.type}
                   </Typography>
-                  <Typography
-                    variant="h6"
-                    fontWeight="bold"
-                    color={`${getTempColor(sensor.temperature)}.main`}
-                  >
+                  <Typography variant="h6" fontWeight="bold" color={`${getTempColor(sensor.temperature)}.main`}>
                     {sensor.temperature.toFixed(1)}°
                   </Typography>
                 </Paper>
@@ -46,7 +44,9 @@ export function TemperatureMonitor({ systemStats }: TemperatureMonitorProps) {
             ))}
           </Grid>
         ) : (
-          <Typography variant="body2" color="text.secondary">暂无数据</Typography>
+          <Typography variant="body2" color="text.secondary">
+            暂无数据
+          </Typography>
         )}
       </CardContent>
     </Card>

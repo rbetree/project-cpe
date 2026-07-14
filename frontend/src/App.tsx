@@ -8,7 +8,7 @@
  * 
  * Copyright (c) 2025 by 1orz, All Rights Reserved. 
  */
-import { lazy, Suspense } from 'react'
+import { lazy, Suspense, type ComponentType, type LazyExoticComponent } from 'react'
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { QueryClientProvider } from '@tanstack/react-query'
 import { Box, CircularProgress } from '@mui/material'
@@ -23,6 +23,7 @@ const Network = lazy(() => import('./pages/Network'))
 const Phone = lazy(() => import('./pages/Phone'))
 const SMS = lazy(() => import('./pages/SMS'))
 const Configuration = lazy(() => import('./pages/Configuration'))
+const InitScript = lazy(() => import('./pages/InitScript'))
 const ATConsole = lazy(() => import('./pages/ATConsole'))
 const Terminal = lazy(() => import('./pages/Terminal'))
 const OtaUpdate = lazy(() => import('./pages/OtaUpdate'))
@@ -36,6 +37,35 @@ function PageLoading() {
   )
 }
 
+type LazyPageComponent = LazyExoticComponent<ComponentType>
+
+interface AppRouteConfig {
+  path?: string
+  index?: boolean
+  component: LazyPageComponent
+}
+
+const appRoutes: AppRouteConfig[] = [
+  { index: true, component: Dashboard },
+  { path: 'device', component: DeviceInfo },
+  { path: 'network', component: Network },
+  { path: 'phone', component: Phone },
+  { path: 'sms', component: SMS },
+  { path: 'config', component: Configuration },
+  { path: 'init-script', component: InitScript },
+  { path: 'ota', component: OtaUpdate },
+  { path: 'at-console', component: ATConsole },
+  { path: 'terminal', component: Terminal },
+]
+
+function renderLazyPage(PageComponent: LazyPageComponent) {
+  return (
+    <Suspense fallback={<PageLoading />}>
+      <PageComponent />
+    </Suspense>
+  )
+}
+
 function App() {
   return (
     <QueryClientProvider client={queryClient}>
@@ -43,18 +73,17 @@ function App() {
         <BrowserRouter>
           <Routes>
             <Route path="/" element={<MainLayout />}>
-              <Route index element={<Suspense fallback={<PageLoading />}><Dashboard /></Suspense>} />
-              <Route path="device" element={<Suspense fallback={<PageLoading />}><DeviceInfo /></Suspense>} />
-              <Route path="network" element={<Suspense fallback={<PageLoading />}><Network /></Suspense>} />
+              {appRoutes.map((route) => (
+                <Route
+                  key={route.path ?? 'index'}
+                  index={route.index}
+                  path={route.path}
+                  element={renderLazyPage(route.component)}
+                />
+              ))}
               {/* 旧路由重定向到网络状态页面 */}
               <Route path="network-interfaces" element={<Navigate to="/network" replace />} />
               <Route path="band-lock" element={<Navigate to="/network" replace />} />
-              <Route path="phone" element={<Suspense fallback={<PageLoading />}><Phone /></Suspense>} />
-              <Route path="sms" element={<Suspense fallback={<PageLoading />}><SMS /></Suspense>} />
-              <Route path="config" element={<Suspense fallback={<PageLoading />}><Configuration /></Suspense>} />
-              <Route path="ota" element={<Suspense fallback={<PageLoading />}><OtaUpdate /></Suspense>} />
-              <Route path="at-console" element={<Suspense fallback={<PageLoading />}><ATConsole /></Suspense>} />
-              <Route path="terminal" element={<Suspense fallback={<PageLoading />}><Terminal /></Suspense>} />
             </Route>
           </Routes>
         </BrowserRouter>

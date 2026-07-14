@@ -4,9 +4,9 @@
  * @LastEditors: 1orz cloudorzi@gmail.com
  * @LastEditTime: 2025-12-13 12:44:10
  * @FilePath: /udx710-backend/frontend/src/pages/Dashboard/components/CellInfo.tsx
- * @Description: 
- * 
- * Copyright (c) 2025 by 1orz, All Rights Reserved. 
+ * @Description:
+ *
+ * Copyright (c) 2025 by 1orz, All Rights Reserved.
  */
 import { useState, type MouseEvent } from 'react'
 import {
@@ -55,7 +55,9 @@ export function CellInfo({ cellsInfo }: CellInfoProps) {
       >
         <Box display="flex" alignItems="center" gap={1} flexWrap="wrap">
           <CellTower fontSize="small" color="primary" />
-          <Typography variant="subtitle2" fontWeight="medium">小区信息</Typography>
+          <Typography variant="subtitle2" fontWeight="medium">
+            小区信息
+          </Typography>
           <Tooltip title={showInfo ? '隐藏敏感信息' : '显示完整信息'}>
             <IconButton
               size="small"
@@ -69,28 +71,23 @@ export function CellInfo({ cellsInfo }: CellInfoProps) {
           </Tooltip>
         </Box>
         <Box display="flex" alignItems="center" gap={0.5}>
-          {cellsInfo?.cells && (
-            <Chip label={`${cellsInfo.cells.length}`} size="small" color="primary" variant="outlined" />
-          )}
-          <IconButton size="small">
-            {expanded ? <ExpandLess /> : <ExpandMore />}
-          </IconButton>
+          {cellsInfo?.cells && <Chip label={`${cellsInfo.cells.length}`} size="small" color="primary" variant="outlined" />}
+          <IconButton size="small">{expanded ? <ExpandLess /> : <ExpandMore />}</IconButton>
         </Box>
       </Box>
       <Collapse in={expanded}>
         <CardContent sx={{ pt: 0, px: { xs: 1, sm: 2 } }}>
-          {/* Serving Cell 摘要 */}
           {cellsInfo?.serving_cell && (
-            <Box 
-              sx={{ 
-                display: 'flex', 
-                flexWrap: 'wrap', 
-                gap: 1, 
-                mb: 1.5, 
-                p: 1, 
-                bgcolor: 'action.hover', 
+            <Box
+              sx={{
+                display: 'flex',
+                flexWrap: 'wrap',
+                gap: 1,
+                mb: 1.5,
+                p: 1,
+                bgcolor: 'action.hover',
                 borderRadius: 1,
-                ...getSensitiveStyle(showInfo)
+                ...getSensitiveStyle(showInfo),
               }}
             >
               <Chip label={cellsInfo.serving_cell.tech?.toUpperCase() || '-'} size="small" color="primary" />
@@ -107,20 +104,30 @@ export function CellInfo({ cellsInfo }: CellInfoProps) {
               <TableHead>
                 <TableRow>
                   <TableCell sx={{ minWidth: 50, py: 0.5, px: 1, fontSize: '0.7rem' }}>频段</TableCell>
-                  <TableCell align="right" sx={{ minWidth: 55, py: 0.5, px: 0.5, fontSize: '0.7rem' }}>ARFCN</TableCell>
-                  <TableCell align="right" sx={{ minWidth: 40, py: 0.5, px: 0.5, fontSize: '0.7rem' }}>PCI</TableCell>
-                  <TableCell align="right" sx={{ minWidth: 50, py: 0.5, px: 0.5, fontSize: '0.7rem' }}>RSRP</TableCell>
-                  <TableCell align="right" sx={{ minWidth: 45, py: 0.5, px: 0.5, fontSize: '0.7rem' }}>RSRQ</TableCell>
-                  <TableCell align="right" sx={{ minWidth: 45, py: 0.5, px: 0.5, fontSize: '0.7rem' }}>SINR</TableCell>
+                  <TableCell align="right" sx={{ minWidth: 55, py: 0.5, px: 0.5, fontSize: '0.7rem' }}>
+                    ARFCN
+                  </TableCell>
+                  <TableCell align="right" sx={{ minWidth: 40, py: 0.5, px: 0.5, fontSize: '0.7rem' }}>
+                    PCI
+                  </TableCell>
+                  <TableCell align="right" sx={{ minWidth: 50, py: 0.5, px: 0.5, fontSize: '0.7rem' }}>
+                    RSRP
+                  </TableCell>
+                  <TableCell align="right" sx={{ minWidth: 45, py: 0.5, px: 0.5, fontSize: '0.7rem' }}>
+                    RSRQ
+                  </TableCell>
+                  <TableCell align="right" sx={{ minWidth: 45, py: 0.5, px: 0.5, fontSize: '0.7rem' }}>
+                    SINR
+                  </TableCell>
                 </TableRow>
               </TableHead>
               <TableBody>
                 {cellsInfo?.cells && cellsInfo.cells.length > 0 ? (
                   cellsInfo.cells.map((cell, idx) => (
-                    <TableRow 
-                      key={idx} 
-                      sx={{ 
-                        bgcolor: cell.is_serving 
+                    <TableRow
+                      key={idx}
+                      sx={{
+                        bgcolor: cell.is_serving
                           ? (theme: Theme) => {
                               const successMain = (theme.palette.success as { main: string }).main
                               return alpha(successMain, theme.palette.mode === 'dark' ? 0.15 : 0.08)
@@ -131,14 +138,14 @@ export function CellInfo({ cellsInfo }: CellInfoProps) {
                       <TableCell sx={{ py: 0.5, px: 1 }}>
                         <Box display="flex" alignItems="center" gap={0.5}>
                           {cell.is_serving && (
-                            <Box 
-                              sx={{ 
-                                width: 6, 
-                                height: 6, 
-                                borderRadius: '50%', 
+                            <Box
+                              sx={{
+                                width: 6,
+                                height: 6,
+                                borderRadius: '50%',
                                 bgcolor: 'success.main',
                                 flexShrink: 0,
-                              }} 
+                              }}
                             />
                           )}
                           <Typography variant="caption" sx={{ fontSize: '0.75rem', fontWeight: cell.is_serving ? 600 : 400 }}>
@@ -146,8 +153,12 @@ export function CellInfo({ cellsInfo }: CellInfoProps) {
                           </Typography>
                         </Box>
                       </TableCell>
-                      <TableCell align="right" sx={{ py: 0.5, px: 0.5, fontSize: '0.75rem', fontFamily: 'monospace' }}>{cell.arfcn || '-'}</TableCell>
-                      <TableCell align="right" sx={{ py: 0.5, px: 0.5, fontSize: '0.75rem', fontFamily: 'monospace' }}>{cell.pci || '-'}</TableCell>
+                      <TableCell align="right" sx={{ py: 0.5, px: 0.5, fontSize: '0.75rem', fontFamily: 'monospace' }}>
+                        {cell.arfcn || '-'}
+                      </TableCell>
+                      <TableCell align="right" sx={{ py: 0.5, px: 0.5, fontSize: '0.75rem', fontFamily: 'monospace' }}>
+                        {cell.pci || '-'}
+                      </TableCell>
                       <TableCell align="right" sx={{ py: 0.5, px: 0.5 }}>
                         {cell.rsrp !== undefined ? (
                           <Chip
@@ -156,10 +167,16 @@ export function CellInfo({ cellsInfo }: CellInfoProps) {
                             color={getSignalChipColor(cell.rsrp)}
                             sx={{ height: 18, fontSize: '0.65rem', '& .MuiChip-label': { px: 0.5 } }}
                           />
-                        ) : '-'}
+                        ) : (
+                          '-'
+                        )}
                       </TableCell>
-                      <TableCell align="right" sx={{ py: 0.5, px: 0.5, fontSize: '0.7rem', fontFamily: 'monospace' }}>{formatSignalValue(cell.rsrq)}</TableCell>
-                      <TableCell align="right" sx={{ py: 0.5, px: 0.5, fontSize: '0.7rem', fontFamily: 'monospace' }}>{formatSignalValue(cell.sinr)}</TableCell>
+                      <TableCell align="right" sx={{ py: 0.5, px: 0.5, fontSize: '0.7rem', fontFamily: 'monospace' }}>
+                        {formatSignalValue(cell.rsrq)}
+                      </TableCell>
+                      <TableCell align="right" sx={{ py: 0.5, px: 0.5, fontSize: '0.7rem', fontFamily: 'monospace' }}>
+                        {formatSignalValue(cell.sinr)}
+                      </TableCell>
                     </TableRow>
                   ))
                 ) : (
@@ -167,7 +184,9 @@ export function CellInfo({ cellsInfo }: CellInfoProps) {
                     <TableCell colSpan={6} align="center">
                       <Box display="flex" alignItems="center" justifyContent="center" gap={1} py={1}>
                         <Info fontSize="small" color="disabled" />
-                        <Typography variant="caption" color="text.secondary">暂无小区数据</Typography>
+                        <Typography variant="caption" color="text.secondary">
+                          暂无小区数据
+                        </Typography>
                       </Box>
                     </TableCell>
                   </TableRow>

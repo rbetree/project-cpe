@@ -4,24 +4,23 @@
  * @LastEditors: 1orz cloudorzi@gmail.com
  * @LastEditTime: 2025-12-13 12:45:08
  * @FilePath: /udx710-backend/frontend/src/utils/carriers.ts
- * @Description: 
- * 
- * Copyright (c) 2025 by 1orz, All Rights Reserved. 
+ * @Description:
+ *
+ * Copyright (c) 2025 by 1orz, All Rights Reserved.
  */
-// 运营商信息数据库 (MCC-MNC 映射)
+
 export interface CarrierInfo {
   mccMnc: string
   mcc: string
   mnc: string
-  operatorCn: string // 中文名称
-  operatorEn: string // 英文名称
-  brand: string // 品牌
-  status: string // 状态
-  technology?: string // 技术标准
-  notes?: string // 备注
+  operatorCn: string
+  operatorEn: string
+  brand: string
+  status: string
+  technology?: string
+  notes?: string
 }
 
-// 中国大陆运营商映射表
 export const CHINA_CARRIERS: CarrierInfo[] = [
   {
     mccMnc: '46000',
@@ -30,7 +29,7 @@ export const CHINA_CARRIERS: CarrierInfo[] = [
     operatorCn: '中国移动',
     operatorEn: 'China Mobile',
     brand: '中国移动',
-    status: '营运中',
+    status: '运营中',
     technology: 'GSM 900 / GSM 1800 / TD-SCDMA 1880 / TD-SCDMA 2010 / TD-LTE 1800/2300/2600',
   },
   {
@@ -40,7 +39,7 @@ export const CHINA_CARRIERS: CarrierInfo[] = [
     operatorCn: '中国联通',
     operatorEn: 'China Unicom',
     brand: '中国联通',
-    status: '营运中',
+    status: '运营中',
     technology: 'GSM 900 / GSM 1800 / UMTS 2100 / TD-LTE 2300/2600 / FDD-LTE 1800/2100',
   },
   {
@@ -50,7 +49,7 @@ export const CHINA_CARRIERS: CarrierInfo[] = [
     operatorCn: '中国移动',
     operatorEn: 'China Mobile',
     brand: '中国移动',
-    status: '营运中',
+    status: '运营中',
     technology: 'GSM 900 / GSM 1800 / TD-SCDMA 1880 / TD-SCDMA 2010',
   },
   {
@@ -60,7 +59,7 @@ export const CHINA_CARRIERS: CarrierInfo[] = [
     operatorCn: '中国电信',
     operatorEn: 'China Telecom',
     brand: '中国电信',
-    status: '营运中',
+    status: '运营中',
     technology: 'CDMA2000 800 / CDMA2000 2100 / TD-LTE 2300/2600 / FDD-LTE 1800/2100 / EV-DO / eHRPD',
   },
   {
@@ -70,7 +69,7 @@ export const CHINA_CARRIERS: CarrierInfo[] = [
     operatorCn: '中国电信',
     operatorEn: 'China Telecom',
     brand: '中国电信',
-    status: '营运中',
+    status: '运营中',
   },
   {
     mccMnc: '46006',
@@ -79,7 +78,7 @@ export const CHINA_CARRIERS: CarrierInfo[] = [
     operatorCn: '中国联通',
     operatorEn: 'China Unicom',
     brand: '中国联通',
-    status: '营运中',
+    status: '运营中',
     technology: 'GSM 900 / GSM 1800 / UMTS 2100',
   },
   {
@@ -89,7 +88,7 @@ export const CHINA_CARRIERS: CarrierInfo[] = [
     operatorCn: '中国移动',
     operatorEn: 'China Mobile',
     brand: '中国移动',
-    status: '营运中',
+    status: '运营中',
     technology: 'GSM 900 / GSM 1800 / TD-SCDMA 1880 / TD-SCDMA 2010',
   },
   {
@@ -99,7 +98,7 @@ export const CHINA_CARRIERS: CarrierInfo[] = [
     operatorCn: '中国联通',
     operatorEn: 'China Unicom',
     brand: '中国联通',
-    status: '营运中',
+    status: '运营中',
   },
   {
     mccMnc: '46011',
@@ -108,7 +107,7 @@ export const CHINA_CARRIERS: CarrierInfo[] = [
     operatorCn: '中国电信',
     operatorEn: 'China Telecom',
     brand: '中国电信',
-    status: '营运中',
+    status: '运营中',
     technology: 'CDMA2000 800 / CDMA2000 2100 / TD-LTE 2300/2600 / FDD-LTE 1800/2100 / EV-DO / eHRPD',
   },
   {
@@ -118,7 +117,7 @@ export const CHINA_CARRIERS: CarrierInfo[] = [
     operatorCn: '中国广电',
     operatorEn: 'China Broadnet',
     brand: '中国广电',
-    status: '营运中',
+    status: '运营中',
     technology: 'LTE 1800 / LTE 900 / TD-LTE 1900 / TD-LTE 2300 / 5G 700 / 5G 2500',
   },
   {
@@ -128,27 +127,19 @@ export const CHINA_CARRIERS: CarrierInfo[] = [
     operatorCn: '中国铁通',
     operatorEn: 'China Tietong',
     brand: '中国铁通',
-    status: '营运中',
+    status: '运营中',
     technology: 'GSM-R',
   },
 ]
 
-// 创建快速查找映射
 const carrierMap = new Map<string, CarrierInfo>()
 CHINA_CARRIERS.forEach((carrier) => {
   carrierMap.set(carrier.mccMnc, carrier)
 })
 
-/**
- * 根据 MCC 和 MNC 获取运营商信息
- * @param mcc 移动国家代码
- * @param mnc 移动网络代码
- * @returns 运营商信息或 null
- */
 export function getCarrierInfo(mcc: string | number | undefined, mnc: string | number | undefined): CarrierInfo | null {
   if (!mcc || !mnc) return null
 
-  // 标准化 MCC 和 MNC (补零)
   const mccStr = String(mcc).padStart(3, '0')
   const mncStr = String(mnc).padStart(2, '0')
   const mccMnc = `${mccStr}${mncStr}`
@@ -156,26 +147,18 @@ export function getCarrierInfo(mcc: string | number | undefined, mnc: string | n
   return carrierMap.get(mccMnc) || null
 }
 
-/**
- * 格式化运营商显示名称
- * @param mcc 移动国家代码
- * @param mnc 移动网络代码
- * @param showEnglish 是否显示英文名称
- * @returns 格式化的运营商名称
- */
 export function formatCarrierName(
   mcc: string | number | undefined,
   mnc: string | number | undefined,
   showEnglish = false
 ): string {
   const carrier = getCarrierInfo(mcc, mnc)
-  
+
   if (!carrier) {
-    // 如果找不到对应的运营商，返回原始 MCC-MNC
     if (mcc && mnc) {
       return `${mcc}-${mnc}`
     }
-    return 'Unknown'
+    return '未知'
   }
 
   if (showEnglish) {
@@ -185,84 +168,63 @@ export function formatCarrierName(
   return carrier.operatorCn
 }
 
-/**
- * 获取运营商品牌颜色 (用于 UI 显示)
- * @param mcc 移动国家代码
- * @param mnc 移动网络代码
- * @returns MUI Chip 颜色
- */
-export function getCarrierColor(mcc: string | number | undefined, mnc: string | number | undefined): 
-  'default' | 'primary' | 'secondary' | 'error' | 'info' | 'success' | 'warning' {
+export function getCarrierColor(
+  mcc: string | number | undefined,
+  mnc: string | number | undefined
+): 'default' | 'primary' | 'secondary' | 'error' | 'info' | 'success' | 'warning' {
   if (!mcc || !mnc) return 'default'
-  
+
   const mccStr = String(mcc)
   const mncStr = String(mnc).padStart(2, '0')
-  
-  // 中国大陆运营商 (MCC 460)
+
   if (mccStr === '460') {
     switch (mncStr) {
-      // 中国移动: 00, 02, 07, 08 - 绿色
       case '00':
       case '02':
       case '07':
       case '08':
         return 'success'
-      // 中国联通: 01, 06, 09 - 红色
       case '01':
       case '06':
       case '09':
         return 'error'
-      // 中国电信: 03, 05, 11 - 蓝色
       case '03':
       case '05':
       case '11':
         return 'primary'
-      // 中国广电: 15 - 紫色
       case '15':
         return 'secondary'
     }
   }
-  
+
   return 'default'
 }
 
-/**
- * 获取运营商 Logo 路径
- * @param mcc 移动国家代码
- * @param mnc 移动网络代码
- * @returns Logo SVG 路径，找不到则返回 null
- */
 export function getCarrierLogo(mcc: string | number | undefined, mnc: string | number | undefined): string | null {
   if (!mcc || !mnc) return null
-  
+
   const mccStr = String(mcc)
   const mncStr = String(mnc).padStart(2, '0')
-  
-  // 中国大陆运营商 (MCC 460)
+
   if (mccStr === '460') {
     switch (mncStr) {
-      // 中国移动: 00, 02, 07, 08
       case '00':
       case '02':
       case '07':
       case '08':
         return '/provider/china-mobile.svg'
-      // 中国联通: 01, 06, 09
       case '01':
       case '06':
       case '09':
         return '/provider/china-unicom.svg'
-      // 中国电信: 03, 05, 11
       case '03':
       case '05':
       case '11':
         return '/provider/china-telecom.svg'
-      // 中国广电: 15
       case '15':
         return '/provider/china-broadnet.svg'
     }
   }
-  
+
   return null
 }
-

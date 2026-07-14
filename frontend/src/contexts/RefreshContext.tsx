@@ -19,7 +19,7 @@ interface RefreshContextType {
 }
 
 export const RefreshContext = createContext<RefreshContextType>({
-  refreshInterval: 1000,
+  refreshInterval: 5000,
   setRefreshInterval: () => {},
   refreshKey: 0,
   triggerRefresh: () => {},

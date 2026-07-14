@@ -28,7 +28,7 @@ export default defineConfig({
     alias: {
       '@': fileURLToPath(new URL('./src', import.meta.url)),
     },
-    // 确保只使用一个 React 副本，避免 "Invalid hook call" 错误
+    // Ensure only one React copy is used to avoid invalid hook call issues.
     dedupe: ['react', 'react-dom'],
   },
 
@@ -37,36 +37,21 @@ export default defineConfig({
     __GIT_BRANCH__: JSON.stringify(gitBranch),
     __GIT_COMMIT__: JSON.stringify(gitCommit),
   },
-  
+
   server: {
     port: 5173,
-    // 配置开发服务器代理，将 /api 请求转发到 Rust 后端
     proxy: {
       '/api': {
         target: 'http://192.168.66.1:3000',
         changeOrigin: true,
-      }
-    }
-  },
-
-  // 生产构建配置
-  build: {
-    // outDir: '../www',
-    // emptyOutDir: true,
-    rollupOptions: {
-      output: {
-        // 手动分包：将大型依赖分离
-        manualChunks: {
-          // React 核心
-          'vendor-react': ['react', 'react-dom', 'react-router-dom'],
-          // MUI 组件库
-          'vendor-mui': ['@mui/material', '@mui/icons-material'],
-          // MUI 图表
-          'vendor-charts': ['@mui/x-charts'],
-          // React Query
-          'vendor-query': ['@tanstack/react-query'],
-        },
       },
     },
+  },
+
+  build: {
+    target: 'es2020',
+    reportCompressedSize: false,
+    // outDir: '../www',
+    // emptyOutDir: true,
   },
 })

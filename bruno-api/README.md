@@ -85,7 +85,7 @@
 - OTA 包结构：`meta.json`（元数据） + `udx710`（二进制） + `www/`（前端）
 - 自动验证：二进制 MD5、架构匹配、版本号比较
 - ZIP 格式会自动修复文件权限（二进制 755，前端文件 644）
-- 上传接口 `/api/ota/upload` 需使用 `multipart/form-data` 或 `application/octet-stream`
+- 上传接口 `/api/ota/upload` 使用 `application/octet-stream`，直接发送 OTA 压缩包二进制内容
 
 ### 电话功能接口
 - **get_calls.bru** - 获取当前通话列表

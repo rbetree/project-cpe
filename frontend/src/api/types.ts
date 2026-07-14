@@ -624,6 +624,19 @@ export interface CallHistoryResponse {
   stats: CallStats
 }
 
+// ============ init.sh 管理类型 ============
+
+export interface InitScriptResponse {
+  script: string
+  init_path: string
+  loader_path: string
+  loader_hooked: boolean
+}
+
+export interface SetInitScriptRequest {
+  script: string
+}
+
 // ============ Webhook 配置类型 ============
 
 // Webhook 配置
@@ -660,9 +673,39 @@ export interface WebhookTestResponse {
   message: string
 }
 
+// ============ 短信推送配置类型 ============
+
+export type SmsPushProvider = 'pushplus' | 'serverchan' | 'pushdeer' | 'bark' | 'ntfy'
+
+export interface SmsPushConfig {
+  enabled: boolean
+  provider: SmsPushProvider
+  credential: string
+  server_url: string
+  topic: string
+  title_template: string
+  body_template: string
+}
+
+export const DEFAULT_SMS_PUSH_TITLE_TEMPLATE = '短信通知 · {{phone_number}}'
+
+export const DEFAULT_SMS_PUSH_BODY_TEMPLATE = `时间: {{timestamp}}
+号码: {{phone_number}}
+状态: {{status}}
+
+{{content}}`
+
 // ========== OTA 更新类型 ==========
 
 // OTA 元数据
+export interface RefreshConfigResponse {
+  interval_ms: number
+  watchdog_active_interval_ms: number
+  watchdog_idle_interval_ms: number
+  heartbeat_timeout_ms: number
+  frontend_connected: boolean
+}
+
 export interface OtaMeta {
   version: string
   commit: string

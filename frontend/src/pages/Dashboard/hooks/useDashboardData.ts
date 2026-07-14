@@ -4,12 +4,17 @@
  * @LastEditors: 1orz cloudorzi@gmail.com
  * @LastEditTime: 2025-12-13 12:44:40
  * @FilePath: /udx710-backend/frontend/src/pages/Dashboard/hooks/useDashboardData.ts
- * @Description: 
- * 
- * Copyright (c) 2025 by 1orz, All Rights Reserved. 
+ * @Description:
+ *
+ * Copyright (c) 2025 by 1orz, All Rights Reserved.
  */
-import { useState, useCallback, useEffect, useRef } from 'react'
+import { useState, useCallback, useRef } from 'react'
 import { api } from '@/api'
+import {
+  getAdaptiveRefreshInterval,
+  useAdaptivePolling,
+  usePageVisibility,
+} from '@/hooks/useAdaptivePolling'
 import type {
   DeviceInfo,
   NetworkInfo,
@@ -22,10 +27,8 @@ import type {
   RoamingResponse,
 } from '@/api/types'
 
-// 网速历史记录的最大数据点数
 export const SPEED_HISTORY_MAX_POINTS = 30
 
-// 单个接口的速度历史类型
 export interface InterfaceSpeedHistory {
   rx: number[]
   tx: number[]
@@ -43,7 +46,7 @@ export interface DashboardData {
   simInfo: SimInfo | null
   systemStats: SystemStatsResponse | null
   networkInfo: NetworkInfo | null
-  dataStatus: boolean
+  dataStatus: boolean | null
   cellsInfo: CellsResponse | null
   qosInfo: QosInfo | null
   airplaneMode: AirplaneModeResponse | null
@@ -60,16 +63,18 @@ export interface DashboardActions {
   loadData: () => Promise<void>
 }
 
+const CONNECTIVITY_MIN_REFRESH_INTERVAL = 15_000
+const CONNECTIVITY_HIDDEN_MIN_REFRESH_INTERVAL = 60_000
+
 export function useDashboardData(refreshInterval: number, refreshKey: number) {
   const [initialLoading, setInitialLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
-  // 数据状态
   const [deviceInfo, setDeviceInfo] = useState<DeviceInfo | null>(null)
   const [simInfo, setSimInfo] = useState<SimInfo | null>(null)
   const [systemStats, setSystemStats] = useState<SystemStatsResponse | null>(null)
   const [networkInfo, setNetworkInfo] = useState<NetworkInfo | null>(null)
-  const [dataStatus, setDataStatus] = useState(false)
+  const [dataStatus, setDataStatus] = useState<boolean | null>(null)
   const [cellsInfo, setCellsInfo] = useState<CellsResponse | null>(null)
   const [qosInfo, setQosInfo] = useState<QosInfo | null>(null)
   const [airplaneMode, setAirplaneMode] = useState<AirplaneModeResponse | null>(null)
@@ -77,27 +82,26 @@ export function useDashboardData(refreshInterval: number, refreshKey: number) {
   const [connectivity, setConnectivity] = useState<ConnectivityResult | null>(null)
   const [roaming, setRoaming] = useState<RoamingResponse | null>(null)
 
-  // 网速历史记录
   const [speedHistory, setSpeedHistory] = useState<Record<string, InterfaceSpeedHistory>>({})
   const speedHistoryRef = useRef<Record<string, InterfaceSpeedHistory>>({})
+  const requestIdRef = useRef(0)
 
-  // 更新速度历史记录
   const updateSpeedHistory = useCallback((stats: SystemStatsResponse | null) => {
     if (!stats?.network_speed?.interfaces) return
 
     const newHistory = { ...speedHistoryRef.current }
-    
+
     for (const iface of stats.network_speed.interfaces) {
       const existing = newHistory[iface.interface] || { rx: [], tx: [], totalRx: 0, totalTx: 0 }
-      
+
       const rxHistory = [...existing.rx, iface.rx_bytes_per_sec]
       const txHistory = [...existing.tx, iface.tx_bytes_per_sec]
-      
+
       if (rxHistory.length > SPEED_HISTORY_MAX_POINTS) {
         rxHistory.shift()
         txHistory.shift()
       }
-      
+
       newHistory[iface.interface] = {
         rx: rxHistory,
         tx: txHistory,
@@ -105,60 +109,154 @@ export function useDashboardData(refreshInterval: number, refreshKey: number) {
         totalTx: iface.total_tx_bytes,
       }
     }
-    
+
     speedHistoryRef.current = newHistory
     setSpeedHistory(newHistory)
   }, [])
 
-  // 加载数据
-  const loadData = useCallback(async () => {
-    setError(null)
-    try {
-      const [deviceRes, simRes, statsRes, networkRes, dataRes, cellsRes, qosRes, airplaneModeRes] = await Promise.all([
-        api.getDeviceInfo(),
-        api.getSimInfo(),
-        api.getSystemStats(),
-        api.getNetworkInfo(),
-        api.getDataStatus(),
-        api.getCellsInfo(),
-        api.getQosInfo(),
-        api.getAirplaneMode(),
-      ])
+  const formatRequestError = useCallback((label: string, errorValue: unknown) => {
+    const message = errorValue instanceof Error ? errorValue.message : String(errorValue)
+    return `${label}: ${message}`
+  }, [])
 
-      if (deviceRes.data) setDeviceInfo(deviceRes.data)
-      if (simRes.data) setSimInfo(simRes.data)
-      if (statsRes.data) {
-        setSystemStats(statsRes.data)
-        updateSpeedHistory(statsRes.data)
-      }
-      if (networkRes.data) setNetworkInfo(networkRes.data)
-      if (dataRes.data) setDataStatus(dataRes.data.active)
-      if (cellsRes.data) setCellsInfo(cellsRes.data)
-      if (qosRes.data) setQosInfo(qosRes.data)
-      if (airplaneModeRes.data) setAirplaneMode(airplaneModeRes.data)
-
-      // 加载扩展数据
-      try {
-        const [imsRes, connectivityRes, roamingRes] = await Promise.all([
-          api.getImsStatus(),
-          api.getConnectivity(),
-          api.getRoamingStatus(),
-        ])
-        if (imsRes.data) setImsStatus(imsRes.data)
-        if (connectivityRes.data) setConnectivity(connectivityRes.data)
-        if (roamingRes.data) setRoaming(roamingRes.data)
-      } catch {
-        console.warn('Extended data not fully available')
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
-    } finally {
-      setInitialLoading(false)
+  const isPageVisible = usePageVisibility()
+  const connectivityRefreshInterval = getAdaptiveRefreshInterval(
+    Math.max(refreshInterval, CONNECTIVITY_MIN_REFRESH_INTERVAL),
+    isPageVisible,
+    {
+      hiddenMinInterval: CONNECTIVITY_HIDDEN_MIN_REFRESH_INTERVAL,
+      hiddenMultiplier: 4,
     }
-  }, [updateSpeedHistory])
+  )
 
-  // 切换数据连接
+  const loadData = useCallback(async () => {
+    const requestId = requestIdRef.current + 1
+    requestIdRef.current = requestId
+    setError(null)
+
+    const extendedRequests = Promise.allSettled([api.getImsStatus(), api.getRoamingStatus()])
+
+    const baseResults = await Promise.allSettled([
+      api.getDeviceInfo(),
+      api.getSimInfo(),
+      api.getSystemStats(),
+      api.getNetworkInfo(),
+      api.getDataStatus(),
+      api.getCellsInfo(),
+      api.getQosInfo(),
+      api.getAirplaneMode(),
+    ])
+
+    if (requestId !== requestIdRef.current) {
+      return
+    }
+
+    const baseErrors: string[] = []
+
+    const deviceResult = baseResults[0]
+    if (deviceResult.status === 'fulfilled') {
+      if (deviceResult.value.data) setDeviceInfo(deviceResult.value.data)
+    } else {
+      baseErrors.push(formatRequestError('设备信息', deviceResult.reason))
+    }
+
+    const simResult = baseResults[1]
+    if (simResult.status === 'fulfilled') {
+      if (simResult.value.data) setSimInfo(simResult.value.data)
+    } else {
+      baseErrors.push(formatRequestError('SIM 信息', simResult.reason))
+    }
+
+    const statsResult = baseResults[2]
+    if (statsResult.status === 'fulfilled') {
+      if (statsResult.value.data) {
+        setSystemStats(statsResult.value.data)
+        updateSpeedHistory(statsResult.value.data)
+      }
+    } else {
+      baseErrors.push(formatRequestError('系统状态', statsResult.reason))
+    }
+
+    const networkResult = baseResults[3]
+    if (networkResult.status === 'fulfilled') {
+      if (networkResult.value.data) setNetworkInfo(networkResult.value.data)
+    } else {
+      baseErrors.push(formatRequestError('网络信息', networkResult.reason))
+    }
+
+    const dataStatusResult = baseResults[4]
+    if (dataStatusResult.status === 'fulfilled') {
+      if (dataStatusResult.value.data) setDataStatus(dataStatusResult.value.data.active)
+    } else {
+      baseErrors.push(formatRequestError('数据连接状态', dataStatusResult.reason))
+    }
+
+    const cellsResult = baseResults[5]
+    if (cellsResult.status === 'fulfilled') {
+      if (cellsResult.value.data) setCellsInfo(cellsResult.value.data)
+    } else {
+      baseErrors.push(formatRequestError('小区信息', cellsResult.reason))
+    }
+
+    const qosResult = baseResults[6]
+    if (qosResult.status === 'fulfilled') {
+      if (qosResult.value.data) setQosInfo(qosResult.value.data)
+    } else {
+      baseErrors.push(formatRequestError('QoS 信息', qosResult.reason))
+    }
+
+    const airplaneModeResult = baseResults[7]
+    if (airplaneModeResult.status === 'fulfilled') {
+      if (airplaneModeResult.value.data) setAirplaneMode(airplaneModeResult.value.data)
+    } else {
+      baseErrors.push(formatRequestError('飞行模式状态', airplaneModeResult.reason))
+    }
+
+    setInitialLoading(false)
+    if (baseErrors.length > 0) {
+      setError(baseErrors[0])
+    }
+
+    const extendedResults = await extendedRequests
+    if (requestId !== requestIdRef.current) {
+      return
+    }
+
+    const extendedErrors: string[] = []
+
+    const imsResult = extendedResults[0]
+    if (imsResult.status === 'fulfilled') {
+      if (imsResult.value.data) setImsStatus(imsResult.value.data)
+    } else {
+      extendedErrors.push(formatRequestError('IMS 状态', imsResult.reason))
+    }
+
+    const roamingResult = extendedResults[1]
+    if (roamingResult.status === 'fulfilled') {
+      if (roamingResult.value.data) setRoaming(roamingResult.value.data)
+    } else {
+      extendedErrors.push(formatRequestError('漫游状态', roamingResult.reason))
+    }
+
+    if (extendedErrors.length > 0 && baseErrors.length === 0) {
+      setError(extendedErrors[0])
+    }
+  }, [formatRequestError, updateSpeedHistory])
+
+  const loadConnectivity = useCallback(async () => {
+    try {
+      const response = await api.getConnectivity()
+      if (response.data) {
+        setConnectivity(response.data)
+      }
+    } catch (errorValue) {
+      setError((currentError) => currentError ?? formatRequestError('连通性检测', errorValue))
+    }
+  }, [formatRequestError])
+
   const toggleData = useCallback(async () => {
+    if (dataStatus === null) return
+
     try {
       const newStatus = !dataStatus
       await api.setDataStatus(newStatus)
@@ -168,10 +266,11 @@ export function useDashboardData(refreshInterval: number, refreshKey: number) {
     }
   }, [dataStatus])
 
-  // 切换飞行模式
   const toggleAirplaneMode = useCallback(async () => {
+    if (!airplaneMode) return
+
     try {
-      const newEnabled = !airplaneMode?.enabled
+      const newEnabled = !airplaneMode.enabled
       const response = await api.setAirplaneMode(newEnabled)
       if (response.data) {
         setAirplaneMode(response.data)
@@ -179,12 +278,13 @@ export function useDashboardData(refreshInterval: number, refreshKey: number) {
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     }
-  }, [airplaneMode?.enabled])
+  }, [airplaneMode])
 
-  // 切换漫游
   const toggleRoaming = useCallback(async () => {
+    if (!roaming) return
+
     try {
-      const newAllowed = !roaming?.roaming_allowed
+      const newAllowed = !roaming.roaming_allowed
       const response = await api.setRoamingAllowed(newAllowed)
       if (response.data) {
         setRoaming(response.data)
@@ -192,16 +292,19 @@ export function useDashboardData(refreshInterval: number, refreshKey: number) {
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     }
-  }, [roaming?.roaming_allowed])
+  }, [roaming])
 
-  // 自动刷新
-  useEffect(() => {
-    void loadData()
-    if (refreshInterval > 0) {
-      const interval = setInterval(() => void loadData(), refreshInterval)
-      return () => clearInterval(interval)
-    }
-  }, [refreshInterval, refreshKey, loadData])
+  useAdaptivePolling({
+    refreshInterval,
+    refreshKey,
+    onTick: loadData,
+  })
+
+  useAdaptivePolling({
+    refreshInterval: connectivityRefreshInterval,
+    refreshKey,
+    onTick: loadConnectivity,
+  })
 
   return {
     initialLoading,

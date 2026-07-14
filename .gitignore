@@ -6,9 +6,21 @@ target/
 frontend/node_modules/
 frontend/dist/
 frontend/.vite/
+frontend/.cache/
+frontend/coverage/
 # 保留 pnpm-lock.yaml，移除其他包管理器的 lockfile
 frontend/yarn.lock
 frontend/package-lock.json
+
+# 常见缓存和构建输出
+build/
+dist/
+coverage/
+.cache/
+.npm-cache/
+.pnpm-store/
+.turbo/
+*.tsbuildinfo
 
 # macOS
 .DS_Store

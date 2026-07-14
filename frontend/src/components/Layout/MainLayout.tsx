@@ -2,39 +2,140 @@
  * @Author: 1orz cloudorzi@gmail.com
  * @Date: 2025-11-22 10:30:41
  * @LastEditors: 1orz cloudorzi@gmail.com
- * @LastEditTime: 2025-12-13 12:43:05
+ * @LastEditTime: 2026-04-18 20:15:00
  * @FilePath: /udx710-backend/frontend/src/components/Layout/MainLayout.tsx
- * @Description: 
- * 
- * Copyright (c) 2025 by 1orz, All Rights Reserved. 
+ * @Description:
+ *
+ * Copyright (c) 2025 by 1orz, All Rights Reserved.
  */
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Outlet } from 'react-router-dom'
-import { Box, useMediaQuery, useTheme, type Theme } from '@mui/material'
+import { Box, type Theme, useMediaQuery, useTheme } from '@mui/material'
+
+import { api } from '../../api'
+import { RefreshContext } from '../../contexts/RefreshContext'
+import { usePageVisibility } from '../../hooks/useAdaptivePolling'
 import Sidebar from './Sidebar'
 import TopBar from './TopBar'
-import { RefreshContext } from '../../contexts/RefreshContext'
 
 const DRAWER_WIDTH = 240
+const DEFAULT_REFRESH_INTERVAL = 5000
+// Keep the heartbeat comfortably below the backend timeout floor so 1s/3s polling
+// does not drift onto the timeout boundary.
+const HEARTBEAT_MIN_INTERVAL = 5000
+const HIDDEN_HEARTBEAT_MIN_INTERVAL = 30000
+
+function getHeartbeatInterval(refreshInterval: number, isPageVisible: boolean) {
+  if (refreshInterval <= 0) {
+    return isPageVisible ? 20000 : 60000
+  }
+
+  if (!isPageVisible) {
+    return Math.max(refreshInterval * 12, HIDDEN_HEARTBEAT_MIN_INTERVAL)
+  }
+
+  return Math.max(refreshInterval * 3, HEARTBEAT_MIN_INTERVAL)
+}
 
 export default function MainLayout() {
   const theme = useTheme<Theme>()
   const isMobile = useMediaQuery(theme.breakpoints.down('sm'))
+  const isPageVisible = usePageVisibility()
   const [mobileOpen, setMobileOpen] = useState(false)
-  const [desktopOpen, setDesktopOpen] = useState(true) // 桌面端侧边栏状态，默认展开
-  const [refreshInterval, setRefreshInterval] = useState(3000) // 默认 3 秒（移动端友好）
+  const [desktopOpen, setDesktopOpen] = useState(true)
+  const [refreshInterval, setRefreshIntervalState] = useState(DEFAULT_REFRESH_INTERVAL)
   const [refreshKey, setRefreshKey] = useState(0)
+  const refreshRequestIdRef = useRef(0)
+
+  useEffect(() => {
+    let cancelled = false
+
+    const loadRefreshConfig = async () => {
+      try {
+        const response = await api.getRefreshConfig()
+        if (
+          !cancelled &&
+          refreshRequestIdRef.current === 0 &&
+          response.status === 'ok' &&
+          response.data
+        ) {
+          setRefreshIntervalState(response.data.interval_ms)
+        }
+      } catch (error) {
+        console.warn('加载刷新设置失败:', error)
+      }
+    }
+
+    void loadRefreshConfig()
+
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  useEffect(() => {
+    let cancelled = false
+
+    const sendHeartbeat = async () => {
+      try {
+        await api.sendRefreshHeartbeat()
+      } catch (error) {
+        if (!cancelled) {
+          console.warn('刷新心跳发送失败:', error)
+        }
+      }
+    }
+
+    void sendHeartbeat()
+
+    const timer = window.setInterval(() => {
+      void sendHeartbeat()
+    }, getHeartbeatInterval(refreshInterval, isPageVisible))
+
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+    }
+  }, [isPageVisible, refreshInterval])
 
   const handleDrawerToggle = () => {
     if (isMobile) {
-      setMobileOpen(!mobileOpen)
+      setMobileOpen((current) => !current)
     } else {
-      setDesktopOpen(!desktopOpen)
+      setDesktopOpen((current) => !current)
     }
   }
 
   const triggerRefresh = () => {
-    setRefreshKey((prev) => prev + 1)
+    setRefreshKey((current) => current + 1)
+  }
+
+  const setRefreshInterval = (interval: number) => {
+    const previousInterval = refreshInterval
+    const requestId = refreshRequestIdRef.current + 1
+    refreshRequestIdRef.current = requestId
+    setRefreshIntervalState(interval)
+    void api
+      .setRefreshConfig(interval)
+      .then((response) => {
+        if (refreshRequestIdRef.current !== requestId) {
+          return
+        }
+
+        if (response.status === 'ok' && response.data) {
+          setRefreshIntervalState(response.data.interval_ms)
+          return
+        }
+
+        setRefreshIntervalState(previousInterval)
+        console.warn('保存刷新设置失败:', response.message)
+      })
+      .catch((error) => {
+        if (refreshRequestIdRef.current === requestId) {
+          setRefreshIntervalState(previousInterval)
+        }
+        console.warn('保存刷新设置失败:', error)
+      })
   }
 
   return (
@@ -42,7 +143,6 @@ export default function MainLayout() {
       value={{ refreshInterval, setRefreshInterval, refreshKey, triggerRefresh }}
     >
       <Box sx={{ display: 'flex', minHeight: '100vh' }}>
-        {/* 顶部导航栏 */}
         <TopBar
           drawerWidth={desktopOpen ? DRAWER_WIDTH : 0}
           onMenuClick={handleDrawerToggle}
@@ -50,7 +150,6 @@ export default function MainLayout() {
           onRefreshIntervalChange={setRefreshInterval}
         />
 
-        {/* 侧边栏 */}
         <Sidebar
           drawerWidth={DRAWER_WIDTH}
           mobileOpen={mobileOpen}
@@ -59,19 +158,14 @@ export default function MainLayout() {
           isMobile={isMobile}
         />
 
-        {/* 主内容区 */}
         <Box
           component="main"
           sx={{
             flexGrow: 1,
             p: { xs: 2, sm: 3 },
-            width: { 
+            width: {
               xs: '100%',
-              sm: desktopOpen ? `calc(100% - ${DRAWER_WIDTH}px)` : '100%'
-            },
-            ml: {
-              xs: 0,
-              sm: desktopOpen ? 0 : 0
+              sm: desktopOpen ? `calc(100% - ${DRAWER_WIDTH}px)` : '100%',
             },
             mt: { xs: 7, sm: 8 },
             minHeight: '100vh',
