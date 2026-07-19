@@ -227,7 +227,7 @@ async fn main() -> Result<()> {
         });
     }
     
-    // 启动数据连接 Watchdog（每 15 秒检查一次）
+    // 启动数据连接 Watchdog（自适应间隔：前端活跃 5s，无头 idle 60s）
     {
         let conn_clone = Arc::clone(&dbus_conn);
         let config_manager = Arc::clone(&config_manager);

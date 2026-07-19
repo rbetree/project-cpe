@@ -121,6 +121,65 @@ pub trait Modem {
     fn set_property(&self, name: &str, value: zbus::zvariant::Value<'_>) -> zbus::Result<()>;
 }
 
+/// 串行 D-Bus/AT 操作的错误类型。
+///
+/// 包装底层 `zbus::Error`，并额外区分“操作超时”（oFona 卡住、长时间持有全局锁）。
+/// 实现 `Display`，handler 中统一以 `format!("{}", e)` 渲染，无需感知具体类型。
+#[derive(Debug)]
+pub enum SerialOpError {
+    /// 底层 D-Bus/AT 操作返回的错误。
+    Inner(zbus::Error),
+    /// 操作在 `SERIAL_OP_TIMEOUT` 内未完成（通常意味着 oFona 卡住）。
+    Timeout,
+}
+
+impl std::fmt::Display for SerialOpError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SerialOpError::Inner(e) => write!(f, "{}", e),
+            SerialOpError::Timeout => write!(
+                f,
+                "D-Bus/AT operation timed out ({}s)",
+                SERIAL_OP_TIMEOUT.as_secs()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SerialOpError {}
+
+impl From<zbus::Error> for SerialOpError {
+    fn from(e: zbus::Error) -> Self {
+        SerialOpError::Inner(e)
+    }
+}
+
+/// 单次串行 D-Bus/AT 操作的超时阈值。
+///
+/// 超过该阈值未完成的操作将被中止并释放全局锁，防止一次卡住的 oFona 调用
+/// 无限期阻塞后续所有射频/数据命令（含看门狗恢复）。修复 H3。
+const SERIAL_OP_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// 带超时的串行执行：在全局锁内执行 `f`，若超过 `SERIAL_OP_TIMEOUT` 则中止。
+///
+/// 超时时 `with_serial` 的 future 被丢弃，其持有的全局锁 guard 随之释放，
+/// 从而避免一次卡顿永久阻塞其它命令。修复 H3。
+async fn with_serial_timed<T, F>(f: F) -> Result<T, SerialOpError>
+where
+    F: std::future::Future<Output = Result<T, zbus::Error>>,
+{
+    match tokio::time::timeout(SERIAL_OP_TIMEOUT, with_serial(f)).await {
+        Ok(inner) => Ok(inner?),
+        Err(_) => {
+            warn!(
+                timeout_secs = SERIAL_OP_TIMEOUT.as_secs(),
+                "with_serial_timed: operation timed out, releasing global lock"
+            );
+            Err(SerialOpError::Timeout)
+        }
+    }
+}
+
 /// 通过 D-Bus 发送 AT 指令
 ///
 /// # Arguments
@@ -129,12 +188,17 @@ pub trait Modem {
 ///
 /// # Returns
 /// AT 指令的响应结果
+///
+/// 注：本函数被大量 zbus::Result 上下文以 `?` 调用，故保持 zbus::Result 返回类型，
+/// 暂未接入 with_serial_timed（超时保护）。看门狗恢复路径已由 set_data_connection /
+/// set_modem_online 的超时覆盖，不会因其 hang 而永久阻塞。AT 操作的超时保护为后续项。
 pub async fn send_at_command(conn: &Connection, cmd: &str) -> zbus::Result<String> {
     with_serial(async {
         let proxy = Proxy::new(conn, "org.ofono", "/ril_0", "org.ofono.Modem").await?;
         let result: String = proxy.call("SendAtcmd", &(cmd)).await?;
         Ok(result)
-    }).await
+    })
+    .await
 }
 
 /// 获取服务小区信息
@@ -388,18 +452,19 @@ pub async fn set_apn_properties(
 ///
 /// # Returns
 /// 操作结果
-pub async fn set_data_connection(conn: &Connection, active: bool) -> zbus::Result<()> {
-    with_serial(async {
+pub async fn set_data_connection(conn: &Connection, active: bool) -> Result<(), SerialOpError> {
+    with_serial_timed(async {
         // 自动查找有效的 internet context
         let context_path = find_internet_context(conn).await?;
-        
+
         let proxy = ConnectionContextProxy::builder(conn)
             .path(context_path)?
             .build()
             .await?;
         proxy.set_property("Active", zbus::zvariant::Value::Bool(active)).await?;
         Ok(())
-    }).await
+    })
+    .await
 }
 
 /// 获取数据连接状态
@@ -477,8 +542,61 @@ pub async fn set_roaming_allowed(conn: &Connection, allowed: bool) -> zbus::Resu
 
 /// 初始化数据连接（程序启动时调用）
 ///
+/// 读取网络注册状态（Status 字符串），失败返回 "unknown"。
+/// 仅读，不持串行锁（与既有读路径一致）。
+async fn read_registration_status(conn: &Connection) -> String {
+    match NetworkRegistrationProxy::new(conn).await {
+        Ok(net_proxy) => match net_proxy.get_properties().await {
+            Ok(props) => props
+                .get("Status")
+                .and_then(|v| String::try_from(v.clone()).ok())
+                .unwrap_or_else(|| "unknown".to_string()),
+            Err(_) => "unknown".to_string(),
+        },
+        Err(_) => "unknown".to_string(),
+    }
+}
+
+/// 确保调制解调器处于软件上电状态（Powered=true）。
+///
+/// 修复 H1：后端原本从不写 Powered，完全假设 oFona 维持上电。本函数幂等——
+/// 仅在 Powered=false 时尝试上电，并在切换后让出全局锁、短暂等待 oFona 注册子接口。
+///
+/// 安全性：**只动 Powered，不碰 Online**。飞行模式下 Powered 也保持 true，
+/// 故本函数与用户飞行模式意图不冲突；Online/射频的干预仅由 watchdog 的升级恢复路径
+/// （`try_escalate`）在“已注网但数据起不来”时处理。
+pub async fn ensure_modem_powered(conn: &Connection) -> Result<(), SerialOpError> {
+    let was_off: bool = with_serial_timed::<bool, _>(async {
+        let proxy = ModemProxy::new(conn).await?;
+        let props = proxy.get_properties().await?;
+        let powered = props
+            .get("Powered")
+            .and_then(|v| bool::try_from(v.clone()).ok())
+            .unwrap_or(false);
+        if powered {
+            return Ok(false);
+        }
+        info!("Modem Powered=false, powering on (ensure oFona power precondition)");
+        proxy
+            .set_property("Powered", zbus::zvariant::Value::Bool(true))
+            .await?;
+        Ok(true)
+    })
+    .await?;
+
+    if was_off {
+        // 让出全局锁后等待 oFona 注册子接口，避免持锁 sleep。
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    Ok(())
+}
+
 /// 检查当前数据连接状态，如果未激活则尝试自动激活。
 /// 这个函数会在后台静默执行，不会阻塞服务启动。
+///
+/// 修复 H1/H2：
+/// - 先 `ensure_modem_powered` 保证 oFona 上电前置条件（Powered=true）。
+/// - 轮询等待网络注册（退避 2/3/5/8/12s，上限 ~30s），而非单次快照未注网即放弃。
 ///
 /// # Arguments
 /// * `conn` - D-Bus 连接
@@ -486,25 +604,33 @@ pub async fn set_roaming_allowed(conn: &Connection, allowed: bool) -> zbus::Resu
 /// # Returns
 /// 初始化结果消息
 pub async fn init_data_connection(conn: &Connection) -> String {
-    // 1. 先检查网络注册状态
-    match NetworkRegistrationProxy::new(conn).await {
-        Ok(net_proxy) => {
-            if let Ok(props) = net_proxy.get_properties().await {
-                let status = props
-                    .get("Status")
-                    .and_then(|v| String::try_from(v.clone()).ok())
-                    .unwrap_or_else(|| "unknown".to_string());
-                
-                if status != "registered" && status != "roaming" {
-                    return format!("Network not registered (status: {}), skipping data connection", status);
-                }
-            }
-        }
-        Err(e) => {
-            return format!("Failed to check network status: {}", e);
-        }
+    // 0. 确保调制解调器已上电（Powered=true）—— oFona 上电时序的前置条件。
+    //    幂等，且不影响 Online/飞行模式。失败不阻断：仍尝试下游流程（Powered 可能由 oFona 维持）。
+    if let Err(e) = ensure_modem_powered(conn).await {
+        warn!(error = %e, "init_data_connection: ensure_modem_powered failed");
     }
-    
+
+    // 1. 轮询等待网络注册（修复 H2：原为单次快照，未注网即 bail 且不重试）
+    const REG_BACKOFF_SECS: [u64; 5] = [2, 3, 5, 8, 12];
+    let mut waited = 0u64;
+    let mut status = read_registration_status(conn).await;
+    for &step in &REG_BACKOFF_SECS {
+        if status == "registered" || status == "roaming" {
+            break;
+        }
+        info!(status = %status, waited_secs = waited, "init: waiting for network registration");
+        tokio::time::sleep(Duration::from_secs(step)).await;
+        waited += step;
+        status = read_registration_status(conn).await;
+    }
+
+    if status != "registered" && status != "roaming" {
+        return format!(
+            "Network not registered after ~{}s (status: {}), delegating to watchdog",
+            waited, status
+        );
+    }
+
     // 2. 自动查找有效的 internet context
     let context_path = match find_internet_context(conn).await {
         Ok(path) => path,
@@ -512,7 +638,7 @@ pub async fn init_data_connection(conn: &Connection) -> String {
             return format!("Failed to find internet context: {}", e);
         }
     };
-    
+
     // 3. 获取 context 的属性
     let proxy = match ConnectionContextProxy::builder(conn)
         .path(context_path.as_str())
@@ -524,32 +650,32 @@ pub async fn init_data_connection(conn: &Connection) -> String {
         },
         Err(e) => return format!("Failed to build context path: {}", e),
     };
-    
+
     let props = match proxy.get_properties().await {
         Ok(p) => p,
         Err(e) => return format!("Failed to get context properties: {}", e),
     };
-    
+
     // 4. 检查是否已激活
     let active = props
         .get("Active")
         .and_then(|v| bool::try_from(v.clone()).ok())
         .unwrap_or(false);
-    
+
     if active {
         return format!("Data connection already active ({})", context_path);
     }
-    
+
     // 5. 检查 APN 是否配置
     let apn = props
         .get("AccessPointName")
         .and_then(|v| String::try_from(v.clone()).ok())
         .unwrap_or_default();
-    
+
     if apn.is_empty() {
         return format!("APN not configured on {}, skipping auto-connect", context_path);
     }
-    
+
     // 6. 尝试激活数据连接
     match set_data_connection(conn, true).await {
         Ok(_) => format!("Data connection activated on {} (APN: {})", context_path, apn),
@@ -630,41 +756,137 @@ async fn auto_configure_apn(conn: &Connection, context_path: &str) -> Result<Str
     Ok(format!("Auto-configured APN: {} ({})", apn, protocol))
 }
 
-/// 检查并恢复数据连接
+/// 升级恢复的连续失败阈值（已注网但 context 连续未激活的 tick 数）。
+const RECOVERY_L1_THRESHOLD: u32 = 4;
+/// L1 升级（cycle Online）的最短冷却，避免频繁重置射频导致 SIM 锁/耗电。
+const RECOVERY_L1_COOLDOWN: Duration = Duration::from_secs(90);
+
+/// 看门狗的恢复状态机。修复 H4：原 watchdog 只会重置 ConnectionContext.Active，
+/// 无任何升级恢复。这里以“连续失败计数 + 冷却”驱动 L0 重激活 → L1 cycle Online。
+#[derive(Default)]
+struct RecoveryState {
+    /// 连续“已注网但 context 未激活”的次数。
+    consecutive_failures: u32,
+    /// 累计执行过的升级次数。
+    escalation_count: u32,
+    /// 上次执行升级恢复的时刻。
+    last_escalation: Option<std::time::Instant>,
+}
+
+impl RecoveryState {
+    fn reset(&mut self) {
+        self.consecutive_failures = 0;
+    }
+
+    fn record_failure(&mut self) {
+        self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+    }
+
+    fn can_escalate(&self, now: std::time::Instant, cooldown: Duration) -> bool {
+        match self.last_escalation {
+            None => true,
+            Some(t) => now.duration_since(t) >= cooldown,
+        }
+    }
+
+    fn next_escalation_in(&self, now: std::time::Instant, cooldown: Duration) -> Duration {
+        match self.last_escalation {
+            None => Duration::ZERO,
+            Some(t) => {
+                let elapsed = now.duration_since(t);
+                if elapsed >= cooldown {
+                    Duration::ZERO
+                } else {
+                    cooldown - elapsed
+                }
+            }
+        }
+    }
+}
+
+/// 设置 Modem.Online（射频上电），走带超时的串行锁。
+async fn set_modem_online(conn: &Connection, online: bool) -> Result<(), SerialOpError> {
+    with_serial_timed(async {
+        let proxy = ModemProxy::new(conn).await?;
+        proxy
+            .set_property("Online", zbus::zvariant::Value::Bool(online))
+            .await?;
+        Ok(())
+    })
+    .await
+}
+
+/// 周期性翻转 Modem.Online（false→等待→true）以强制射频重连。
+/// 先确保 Powered=true（覆盖运行时 Powered 掉电，H1 重症场景），再 cycle Online。
+/// 两次 set 之间让出全局锁，避免持锁 sleep。
+async fn cycle_online(conn: &Connection) -> Result<(), SerialOpError> {
+    ensure_modem_powered(conn).await?;
+    set_modem_online(conn, false).await?;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    set_modem_online(conn, true).await?;
+    Ok(())
+}
+
+/// 升级恢复：连续失败达阈值且冷却已过时，cycle Online 强制射频重连。
 ///
-/// 这个函数被 watchdog 调用，检查数据连接状态并在需要时恢复
+/// 修复 H4。仅在调用方保证“已注网”时触发——飞行模式不会注网，故不会与用户
+/// 飞行模式冲突。不做自动 reboot；Powered cycle 留作后续（避免 SIM 锁风险）。
+async fn try_escalate(conn: &Connection, recovery: &mut RecoveryState) -> Option<String> {
+    if recovery.consecutive_failures < RECOVERY_L1_THRESHOLD {
+        return None;
+    }
+    let now = std::time::Instant::now();
+    if !recovery.can_escalate(now, RECOVERY_L1_COOLDOWN) {
+        return Some(format!(
+            "escalation pending cooldown ({}s left)",
+            recovery
+                .next_escalation_in(now, RECOVERY_L1_COOLDOWN)
+                .as_secs()
+        ));
+    }
+    recovery.last_escalation = Some(now);
+    recovery.escalation_count = recovery.escalation_count.saturating_add(1);
+    match cycle_online(conn).await {
+        Ok(_) => {
+            recovery.consecutive_failures = 0;
+            Some(format!(
+                "escalated: cycled Modem.Online (#{})",
+                recovery.escalation_count
+            ))
+        }
+        Err(e) => Some(format!("escalation (Online cycle) failed: {}", e)),
+    }
+}
+
+/// 检查并恢复数据连接（带升级恢复）。
+///
+/// 被 watchdog 调用：检查数据连接状态，按 L0 重激活 → L1 cycle Online 的梯度恢复。
+/// 修复 H4：原实现每 tick 只重置一次 ConnectionContext.Active，从不升级。
 ///
 /// # Arguments
 /// * `conn` - D-Bus 连接
+/// * `recovery` - 看门狗持有的恢复状态机
 ///
 /// # Returns
 /// 当前状态描述字符串
-async fn check_and_restore_data_connection(conn: &Connection) -> String {
+async fn check_and_restore_data_connection(conn: &Connection, recovery: &mut RecoveryState) -> String {
     // 1. 检查网络注册状态
-    let net_status = match NetworkRegistrationProxy::new(conn).await {
-        Ok(net_proxy) => {
-            match net_proxy.get_properties().await {
-                Ok(props) => props
-                    .get("Status")
-                    .and_then(|v| String::try_from(v.clone()).ok())
-                    .unwrap_or_else(|| "unknown".to_string()),
-                Err(_) => "unknown".to_string(),
-            }
-        }
-        Err(_) => return "Network proxy unavailable".to_string(),
-    };
-    
-    // 网络未注册时不尝试恢复
+    let net_status = read_registration_status(conn).await;
+    if net_status == "unknown" {
+        return "Network proxy unavailable".to_string();
+    }
+
+    // 网络未注册时不尝试激活，交由 watchdog 继续 tick（不累加失败计数）
     if net_status != "registered" && net_status != "roaming" {
         return format!("Waiting for network (status: {})", net_status);
     }
-    
+
     // 2. 查找 internet context
     let context_path = match find_internet_context(conn).await {
         Ok(path) => path,
         Err(e) => return format!("No internet context: {}", e),
     };
-    
+
     // 3. 获取 context 属性
     let proxy = match ConnectionContextProxy::builder(conn)
         .path(context_path.as_str())
@@ -676,46 +898,64 @@ async fn check_and_restore_data_connection(conn: &Connection) -> String {
         },
         Err(e) => return format!("Context path error: {}", e),
     };
-    
+
     let props = match proxy.get_properties().await {
         Ok(p) => p,
         Err(e) => return format!("Get properties error: {}", e),
     };
-    
+
     let apn = props
         .get("AccessPointName")
         .and_then(|v| String::try_from(v.clone()).ok())
         .unwrap_or_default();
-    
+
     let active = props
         .get("Active")
         .and_then(|v| bool::try_from(v.clone()).ok())
         .unwrap_or(false);
-    
-    // 4. 如果 APN 为空，尝试自动配置
+
+    // 4. 已激活且 APN 已配置 => 恢复成功，清零计数
+    if active && !apn.is_empty() {
+        recovery.reset();
+        return format!("Connected (APN: {})", apn);
+    }
+
+    // 5. APN 为空 => 自动配置后激活
     if apn.is_empty() {
         match auto_configure_apn(conn, &context_path).await {
-            Ok(msg) => {
-                // APN 配置成功后，继续尝试激活
-                match set_data_connection(conn, true).await {
-                    Ok(_) => return format!("{}, connection activated", msg),
-                    Err(e) => return format!("{}, but activation failed: {}", msg, e),
+            Ok(msg) => match set_data_connection(conn, true).await {
+                Ok(_) => {
+                    recovery.reset();
+                    return format!("{}, connection activated", msg);
                 }
-            }
+                Err(e) => {
+                    recovery.record_failure();
+                    return format!(
+                        "{}, but activation failed: {} (failures={})",
+                        msg, e, recovery.consecutive_failures
+                    );
+                }
+            },
             Err(e) => return format!("APN not configured: {}", e),
         }
     }
-    
-    // 5. 如果连接未激活，尝试激活
-    if !active {
-        match set_data_connection(conn, true).await {
-            Ok(_) => return format!("Connection restored (APN: {})", apn),
-            Err(e) => return format!("Activation failed: {}", e),
-        }
+
+    // 6. 未激活 => 累计失败、尝试激活；反复未激活则升级恢复（修复 H4）
+    recovery.record_failure();
+    let activate_outcome = match set_data_connection(conn, true).await {
+        Ok(_) => format!("Connection restore attempted (APN: {})", apn),
+        Err(e) => format!(
+            "Activation failed: {} (failures={})",
+            e, recovery.consecutive_failures
+        ),
+    };
+
+    // 连续未激活达阈值且冷却已过 => cycle Online 强制 RF 重连
+    if let Some(msg) = try_escalate(conn, recovery).await {
+        return format!("{}; {}", activate_outcome, msg);
     }
-    
-    // 6. 连接正常
-    format!("Connected (APN: {})", apn)
+
+    activate_outcome
 }
 
 /// 数据连接 Watchdog - 后台轮询监控并自动恢复
@@ -735,6 +975,7 @@ pub async fn data_connection_watchdog(
     
     let mut last_data_log = String::new();
     let mut last_iptables_action = false; // 上次是否清空了 iptables
+    let mut recovery = RecoveryState::default(); // 升级恢复状态机（修复 H4）
     
     loop {
         let refresh = config_manager.get_refresh();
@@ -776,8 +1017,8 @@ pub async fn data_connection_watchdog(
             }
         }
         
-        // 2. 检查并恢复数据连接
-        let result = check_and_restore_data_connection(&conn).await;
+        // 2. 检查并恢复数据连接（带升级恢复）
+        let result = check_and_restore_data_connection(&conn, &mut recovery).await;
         
         // 只在状态变化时打印日志，避免刷屏
         if result != last_data_log {
@@ -1071,18 +1312,11 @@ fn parse_u32_from_keys(cell_info: &HashMap<String, OwnedValue>, keys: &[&str]) -
 /// 飞行模式通过设置 Modem 的 Online 属性实现：
 /// - Online = false: 关闭射频，进入飞行模式（但 Modem 保持上电）
 /// - Online = true: 开启射频，退出飞行模式
-pub async fn set_airplane_mode(conn: &Connection, enabled: bool) -> zbus::Result<()> {
-    with_serial(async {
-        let proxy = ModemProxy::new(conn).await?;
-        
-        // 飞行模式：设置 Online 为相反值
-        // enabled=true 表示开启飞行模式，即 Online=false
-        proxy
-            .set_property("Online", zbus::zvariant::Value::Bool(!enabled))
-            .await?;
-        
-        Ok(())
-    }).await
+pub async fn set_airplane_mode(conn: &Connection, enabled: bool) -> Result<(), SerialOpError> {
+    // 飞行模式：设置 Online 为相反值
+    // enabled=true 表示开启飞行模式，即 Online=false
+    // 复用 set_modem_online（带超时的串行锁，修复 H3）
+    set_modem_online(conn, !enabled).await
 }
 
 /// 获取飞行模式状态
