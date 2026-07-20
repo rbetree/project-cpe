@@ -33,7 +33,7 @@ use std::sync::Arc;
 use std::path::PathBuf;
 use tower_http::cors::{CorsLayer, Any};
 use tracing::{info, warn};
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
 use zbus::Connection;
 
 mod config;
