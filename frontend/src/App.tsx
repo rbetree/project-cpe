@@ -27,6 +27,7 @@ const InitScript = lazy(() => import('./pages/InitScript'))
 const ATConsole = lazy(() => import('./pages/ATConsole'))
 const Terminal = lazy(() => import('./pages/Terminal'))
 const OtaUpdate = lazy(() => import('./pages/OtaUpdate'))
+const Logs = lazy(() => import('./pages/Logs'))
 
 // 页面加载中的 fallback
 function PageLoading() {
@@ -56,6 +57,7 @@ const appRoutes: AppRouteConfig[] = [
   { path: 'ota', component: OtaUpdate },
   { path: 'at-console', component: ATConsole },
   { path: 'terminal', component: Terminal },
+  { path: 'logs', component: Logs },
 ]
 
 function renderLazyPage(PageComponent: LazyPageComponent) {

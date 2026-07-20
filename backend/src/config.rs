@@ -193,6 +193,111 @@ fn sanitize_refresh_interval_ms(interval_ms: u64) -> u64 {
     }
 }
 
+/// 日志级别（用于 log_export 的远程上报与现场查看分别过滤）
+pub fn parse_level(s: &str) -> Option<tracing::Level> {
+    match s.to_ascii_lowercase().as_str() {
+        "error" => Some(tracing::Level::ERROR),
+        "warn" => Some(tracing::Level::WARN),
+        "info" => Some(tracing::Level::INFO),
+        "debug" => Some(tracing::Level::DEBUG),
+        "trace" => Some(tracing::Level::TRACE),
+        _ => None,
+    }
+}
+
+/// 日志导出/上报配置（方向A 远程上报 + 方向B 现场查看/导出）
+///
+/// 设备内存受限：整个日志**不落盘**，只在内存中维护一个**严格有界**的环形缓冲。
+/// - 缓冲容量受 `buffer_capacity`（条数）与 LogBuffer 内部硬字节上限（1.5 MiB）双重夹逼。
+/// - 远程上报（方向A）按 batch/flush 异步 POST 到外部端点，复用 reqwest；离线时有界重试、丢旧+计数。
+/// - 现场查看（方向B）通过 SSE 实时推流 + 导出接口暴露给前端，持久化落在操作者浏览器/磁盘。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogExportConfig {
+    /// 远程上报总开关
+    #[serde(default)]
+    pub remote_enabled: bool,
+    /// 远程上报端点（HTTPS 推荐）；为空时即使开关打开也不上报
+    #[serde(default)]
+    pub remote_url: String,
+    /// 可选 Bearer Token（设置后请求头带 `Authorization: Bearer <token>`）
+    #[serde(default)]
+    pub remote_token: String,
+    /// 远程上报最低级别（error/warn/info/debug/trace）
+    #[serde(default = "default_log_level")]
+    pub remote_level: String,
+    /// 单批最大条数（到达即 flush）
+    #[serde(default = "default_log_batch_size")]
+    pub batch_size: usize,
+    /// flush 间隔（毫秒）
+    #[serde(default = "default_log_flush_interval_ms")]
+    pub flush_interval_ms: u64,
+    /// 现场查看（SSE/导出）开关
+    #[serde(default = "default_log_viewer_enabled")]
+    pub viewer_enabled: bool,
+    /// 现场查看最低级别
+    #[serde(default = "default_log_viewer_level")]
+    pub viewer_level: String,
+    /// 环形缓冲条数上限（同时受内部 1.5 MiB 字节硬上限约束）
+    #[serde(default = "default_log_buffer_capacity")]
+    pub buffer_capacity: usize,
+}
+
+fn default_log_level() -> String {
+    "info".to_string()
+}
+fn default_log_viewer_level() -> String {
+    "info".to_string()
+}
+fn default_log_batch_size() -> usize {
+    100
+}
+fn default_log_flush_interval_ms() -> u64 {
+    5_000
+}
+fn default_log_viewer_enabled() -> bool {
+    true
+}
+fn default_log_buffer_capacity() -> usize {
+    2_000
+}
+
+impl Default for LogExportConfig {
+    fn default() -> Self {
+        Self {
+            remote_enabled: false,
+            remote_url: String::new(),
+            remote_token: String::new(),
+            remote_level: default_log_level(),
+            batch_size: default_log_batch_size(),
+            flush_interval_ms: default_log_flush_interval_ms(),
+            viewer_enabled: default_log_viewer_enabled(),
+            viewer_level: default_log_viewer_level(),
+            buffer_capacity: default_log_buffer_capacity(),
+        }
+    }
+}
+
+impl LogExportConfig {
+    /// 钳到安全范围，保证内存预算（峰值 ≤ 2MB）
+    pub fn sanitize(mut self) -> Self {
+        self.remote_url = self.remote_url.trim().to_string();
+        if !matches!(
+            parse_level(&self.remote_level),
+            Some(_)
+        ) {
+            self.remote_level = default_log_level();
+        }
+        if parse_level(&self.viewer_level).is_none() {
+            self.viewer_level = default_log_viewer_level();
+        }
+        self.batch_size = self.batch_size.clamp(1, 500);
+        self.flush_interval_ms = self.flush_interval_ms.clamp(500, 60_000);
+        // 条数上限：即便用户填很大，LogBuffer 的 1.5MiB 字节硬顶仍会兜底
+        self.buffer_capacity = self.buffer_capacity.clamp(100, 10_000);
+        self
+    }
+}
+
 /// 应用配置
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AppConfig {
@@ -202,6 +307,8 @@ pub struct AppConfig {
     pub sms_push: SmsPushConfig,
     #[serde(default)]
     pub refresh: RefreshConfig,
+    #[serde(default)]
+    pub log_export: LogExportConfig,
 }
 
 
@@ -220,6 +327,7 @@ impl ConfigManager {
                     match serde_json::from_str::<AppConfig>(&content) {
                         Ok(cfg) => AppConfig {
                             refresh: cfg.refresh.sanitize(),
+                            log_export: cfg.log_export.clone().sanitize(),
                             ..cfg
                         },
                         Err(e) => {
@@ -295,12 +403,30 @@ impl ConfigManager {
         self.save()
     }
 
+    pub fn get_log_export(&self) -> LogExportConfig {
+        self.config
+            .read()
+            .unwrap()
+            .log_export
+            .clone()
+            .sanitize()
+    }
+
+    pub fn set_log_export(&self, log_export: LogExportConfig) -> Result<(), String> {
+        {
+            let mut config = self.config.write().unwrap();
+            config.log_export = log_export.sanitize();
+        }
+        self.save()
+    }
+
     #[allow(dead_code)]
     pub fn set(&self, config: AppConfig) -> Result<(), String> {
         {
             let mut current = self.config.write().unwrap();
             *current = AppConfig {
                 refresh: config.refresh.sanitize(),
+                log_export: config.log_export.clone().sanitize(),
                 ..config
             };
         }
@@ -342,6 +468,7 @@ impl ConfigManager {
             let mut config = self.config.write().unwrap();
             *config = AppConfig {
                 refresh: new_config.refresh.sanitize(),
+                log_export: new_config.log_export.clone().sanitize(),
                 ..new_config
             };
         }
