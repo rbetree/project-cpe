@@ -73,6 +73,8 @@ import type {
   RefreshConfigResponse,
   OtaStatusResponse,
   OtaUploadResponse,
+  LogExportConfig,
+  LogsConfigResponse,
 } from './types'
 
 // API 基础配置
@@ -562,6 +564,49 @@ class UDX710API {
     return request<ApiResponse<WebhookTestResponse>>('/sms-push/test', {
       method: 'POST',
     })
+  }
+
+  // ========== 日志导出/上报功能 ==========
+
+  // 获取日志导出配置 + 丢弃统计
+  async getLogsConfig() {
+    return request<ApiResponse<LogsConfigResponse>>('/logs/config')
+  }
+
+  // 设置日志导出配置
+  async setLogsConfig(config: LogExportConfig) {
+    return request<ApiResponse<Record<string, unknown>>>('/logs/config', {
+      method: 'POST',
+      body: JSON.stringify(config),
+    })
+  }
+
+  // 测试远程上报端点
+  async testLogsRemote() {
+    return request<ApiResponse<WebhookTestResponse>>('/logs/test', {
+      method: 'POST',
+    })
+  }
+
+  // 清空当前缓冲日志
+  async clearLogs() {
+    return request<ApiResponse<Record<string, unknown>>>('/logs/clear', {
+      method: 'POST',
+    })
+  }
+
+  // 导出日志（text 或 json），返回 Blob 供下载
+  async exportLogs(format: 'text' | 'json' = 'text') {
+    const response = await fetch(`${API_BASE}/logs/export?format=${format}`)
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`)
+    }
+    return response.blob()
+  }
+
+  // 建立 SSE 实时日志流（返回原生 EventSource，调用方负责关闭）
+  streamLogs(): EventSource {
+    return new EventSource(`${API_BASE}/logs/stream`)
   }
 
   async getRefreshConfig() {

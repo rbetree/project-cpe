@@ -695,6 +695,42 @@ export const DEFAULT_SMS_PUSH_BODY_TEMPLATE = `时间: {{timestamp}}
 
 {{content}}`
 
+// ========== 日志导出/上报类型 ==========
+
+// 日志级别
+export type LogLevel = 'error' | 'warn' | 'info' | 'debug' | 'trace'
+
+// 单条日志
+export interface LogEntry {
+  ts: string
+  level: string // ERROR/WARN/INFO/DEBUG/TRACE
+  target: string
+  message: string
+  fields: string
+}
+
+// 日志导出配置（方向A 远程上报 + 方向B 现场查看/导出）
+export interface LogExportConfig {
+  remote_enabled: boolean
+  remote_url: string
+  remote_token: string
+  remote_level: LogLevel
+  batch_size: number
+  flush_interval_ms: number
+  viewer_enabled: boolean
+  viewer_level: LogLevel
+  buffer_capacity: number
+}
+
+// GET /api/logs/config 响应（配置 + 丢弃统计）
+export interface LogsConfigResponse extends LogExportConfig {
+  dropped_overflow: number
+  dropped_remote: number
+}
+
+// 可选级别常量（供下拉选择）
+export const LOG_LEVEL_OPTIONS: LogLevel[] = ['error', 'warn', 'info', 'debug', 'trace']
+
 // ========== OTA 更新类型 ==========
 
 // OTA 元数据

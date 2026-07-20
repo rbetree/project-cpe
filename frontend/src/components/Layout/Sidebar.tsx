@@ -34,6 +34,7 @@ import {
   WebAsset as WebTerminalIcon,
   SystemUpdateAlt as OtaIcon,
   RocketLaunch as InitScriptIcon,
+  Article as LogsIcon,
 } from '@mui/icons-material'
 
 interface SidebarProps {
@@ -55,6 +56,7 @@ const menuItems = [
   { path: '/ota', label: 'OTA 更新', icon: OtaIcon },
   { path: '/at-console', label: 'AT 控制台', icon: TerminalIcon },
   { path: '/terminal', label: 'Web 终端', icon: WebTerminalIcon },
+  { path: '/logs', label: '日志', icon: LogsIcon },
 ]
 
 export default function Sidebar({ drawerWidth, mobileOpen, desktopOpen, onClose, isMobile }: SidebarProps) {

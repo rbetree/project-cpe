@@ -15,15 +15,16 @@
 use axum::{
     extract::{Query, State},
     http::{HeaderMap, HeaderValue, StatusCode},
-    response::IntoResponse,
+    response::{sse::KeepAlive, sse::Event, sse::Sse, IntoResponse},
     Json,
 };
+use futures_util::stream;
 use serde_json::json;
 use std::sync::Arc;
 use zbus::Connection;
 
 use crate::{
-    config::{ConfigManager, RefreshConfig},
+    config::{ConfigManager, LogExportConfig, RefreshConfig},
     dbus::{
         get_airplane_mode, get_all_apn_contexts, get_data_connection_status, get_device_info_data,
         get_network_info_data, get_qos_info_data, get_radio_mode, get_roaming_status, get_serving_cell_info,
@@ -31,6 +32,7 @@ use crate::{
         set_radio_mode, set_roaming_allowed,
     },
     iptables::flush_iptables,
+    log_export::{LogBuffer, LogEntry},
     models::*,
     usb_switch,
     utils::{
@@ -2954,5 +2956,263 @@ pub async fn cancel_ota_handler() -> impl IntoResponse {
             ))),
         ),
     }
+}
+
+// ============ 日志导出/上报接口 ============
+
+/// GET /api/logs/config 响应：配置 + 丢弃统计
+#[derive(Debug, serde::Serialize)]
+pub struct LogsConfigResponse {
+    #[serde(flatten)]
+    pub config: LogExportConfig,
+    pub dropped_overflow: u64,
+    pub dropped_remote: u64,
+}
+
+/// GET /api/logs/config - 获取日志导出配置与丢弃统计
+pub async fn get_logs_config_handler(
+    State(config_manager): State<Arc<ConfigManager>>,
+    State(log_buffer): State<Arc<LogBuffer>>,
+) -> (StatusCode, Json<ApiResponse<LogsConfigResponse>>) {
+    let config = config_manager.get_log_export();
+    let (dropped_overflow, dropped_remote) = log_buffer.dropped_stats();
+    (
+        StatusCode::OK,
+        Json(ApiResponse::success_with_message(
+            "Success",
+            LogsConfigResponse {
+                config,
+                dropped_overflow,
+                dropped_remote,
+            },
+        )),
+    )
+}
+
+/// POST /api/logs/config - 设置日志导出配置（立即同步到缓冲/shipper）
+pub async fn set_logs_config_handler(
+    State(config_manager): State<Arc<ConfigManager>>,
+    State(log_buffer): State<Arc<LogBuffer>>,
+    Json(cfg): Json<LogExportConfig>,
+) -> (StatusCode, Json<ApiResponse<serde_json::Value>>) {
+    match config_manager.set_log_export(cfg) {
+        Ok(_) => {
+            let synced = config_manager.get_log_export();
+            log_buffer.update_config(&synced);
+            (
+                StatusCode::OK,
+                Json(ApiResponse::success_with_message(
+                    "Log export config updated",
+                    json!({}),
+                )),
+            )
+        }
+        Err(e) => (
+            StatusCode::OK,
+            Json(ApiResponse::error(format!("Failed to update log export config: {}", e))),
+        ),
+    }
+}
+
+/// GET /api/logs/stream - SSE 实时日志推流
+pub async fn logs_stream_handler(
+    State(config_manager): State<Arc<ConfigManager>>,
+    State(log_buffer): State<Arc<LogBuffer>>,
+) -> axum::response::Response {
+    if !config_manager.get_log_export().viewer_enabled {
+        return (StatusCode::FORBIDDEN, "Log viewer is disabled").into_response();
+    }
+    let rx = log_buffer.subscribe();
+    let stream = stream::unfold(rx, |mut rx| async move {
+        match rx.recv().await {
+            Ok(entry) => {
+                let data = serde_json::to_string(&*entry).unwrap_or_else(|_| "{}".to_string());
+                let event = Event::default().event("log").data(data);
+                Some((Ok::<_, std::convert::Infallible>(event), rx))
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                let event = Event::default().event("lag").data(format!("{{\"lagged\":{n}}}"));
+                Some((Ok(event), rx))
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => None,
+        }
+    });
+
+    Sse::new(stream)
+        .keep_alive(
+            KeepAlive::new()
+                .interval(std::time::Duration::from_secs(15))
+                .text("keep-alive"),
+        )
+        .into_response()
+}
+
+/// GET /api/logs/export - 导出当前缓冲日志
+///
+/// 查询参数 `format`：`text`（默认）或 `json`
+#[derive(Debug, serde::Deserialize)]
+pub struct LogsExportQuery {
+    #[serde(default)]
+    pub format: Option<String>,
+}
+
+pub async fn logs_export_handler(
+    State(config_manager): State<Arc<ConfigManager>>,
+    State(log_buffer): State<Arc<LogBuffer>>,
+    Query(query): Query<LogsExportQuery>,
+) -> Result<axum::response::Response, (StatusCode, String)> {
+    if !config_manager.get_log_export().viewer_enabled {
+        return Err((StatusCode::FORBIDDEN, "Log viewer is disabled".to_string()));
+    }
+    let snapshot: Vec<LogEntry> = log_buffer
+        .snapshot()
+        .into_iter()
+        .map(|arc| (*arc).clone())
+        .collect();
+
+    let is_json = query
+        .format
+        .as_deref()
+        .map(|f| f.eq_ignore_ascii_case("json"))
+        .unwrap_or(false);
+
+    let (content_type, disposition, body): (&'static str, &'static str, String) = if is_json {
+        (
+            "application/json; charset=utf-8",
+            "attachment; filename=\"udx710-logs.json\"",
+            serde_json::to_string_pretty(&snapshot).unwrap_or_else(|_| "[]".to_string()),
+        )
+    } else {
+        let mut text = String::with_capacity(snapshot.len() * 128);
+        for entry in &snapshot {
+            text.push_str(&entry.to_text_line());
+            text.push('\n');
+        }
+        (
+            "text/plain; charset=utf-8",
+            "attachment; filename=\"udx710.log\"",
+            text,
+        )
+    };
+
+    let mut resp = body.into_response();
+    resp.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        HeaderValue::from_static(content_type),
+    );
+    resp.headers_mut().insert(
+        axum::http::header::CONTENT_DISPOSITION,
+        HeaderValue::from_static(disposition),
+    );
+    Ok(resp)
+}
+
+/// POST /api/logs/test - 测试远程上报端点连通性（发送一条测试日志）
+pub async fn test_logs_remote_handler(
+    State(config_manager): State<Arc<ConfigManager>>,
+) -> (StatusCode, Json<ApiResponse<WebhookTestResponse>>) {
+    let cfg = config_manager.get_log_export();
+    if cfg.remote_url.is_empty() {
+        return (
+            StatusCode::OK,
+            Json(ApiResponse::success_with_message(
+                "Remote URL is empty",
+                WebhookTestResponse {
+                    success: false,
+                    message: "请先填写远程上报 URL".to_string(),
+                },
+            )),
+        );
+    }
+    let test_entry = LogEntry {
+        ts: chrono::Utc::now().to_rfc3339(),
+        level: "INFO".to_string(),
+        target: "log_export".to_string(),
+        message: "🔧 project-cpe 远程上报测试".to_string(),
+        fields: "source=test".to_string(),
+    };
+    let body = match serde_json::to_vec(&vec![&test_entry]) {
+        Ok(b) => b,
+        Err(e) => {
+            return (
+                StatusCode::OK,
+                Json(ApiResponse::success_with_message(
+                    "Serialize failed",
+                    WebhookTestResponse {
+                        success: false,
+                        message: format!("序列化失败: {e}"),
+                    },
+                )),
+            );
+        }
+    };
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::OK,
+                Json(ApiResponse::success_with_message(
+                    "Client build failed",
+                    WebhookTestResponse {
+                        success: false,
+                        message: format!("HTTP 客户端构建失败: {e}"),
+                    },
+                )),
+            );
+        }
+    };
+    let mut req = client
+        .post(cfg.remote_url.as_str())
+        .header("Content-Type", "application/json")
+        .body(body);
+    if !cfg.remote_token.is_empty() {
+        req = req.header("Authorization", format!("Bearer {}", cfg.remote_token));
+    }
+    match req.send().await {
+        Ok(resp) if resp.status().is_success() => (
+            StatusCode::OK,
+            Json(ApiResponse::success_with_message(
+                "Remote log test successful",
+                WebhookTestResponse {
+                    success: true,
+                    message: format!("HTTP {}", resp.status()),
+                },
+            )),
+        ),
+        Ok(resp) => (
+            StatusCode::OK,
+            Json(ApiResponse::success_with_message(
+                "Remote log test failed",
+                WebhookTestResponse {
+                    success: false,
+                    message: format!("HTTP {}", resp.status()),
+                },
+            )),
+        ),
+        Err(e) => (
+            StatusCode::OK,
+            Json(ApiResponse::success_with_message(
+                "Remote log test failed",
+                WebhookTestResponse {
+                    success: false,
+                    message: format!("请求失败: {e}"),
+                },
+            )),
+        ),
+    }
+}
+
+/// POST /api/logs/clear - 清空当前缓冲日志
+pub async fn clear_logs_handler(
+    State(log_buffer): State<Arc<LogBuffer>>,
+) -> (StatusCode, Json<ApiResponse<serde_json::Value>>) {
+    log_buffer.clear();
+    (
+        StatusCode::OK,
+        Json(ApiResponse::success_with_message("Logs cleared", json!({}))),
+    )
 }
 

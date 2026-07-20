@@ -41,6 +41,7 @@ mod db;
 mod dbus;
 mod handlers;
 mod iptables;
+mod log_export;
 mod models;
 mod ota;
 mod serial;
@@ -147,10 +148,22 @@ struct Args {
 #[tokio::main]
 async fn main() -> Result<()> {
     // 初始化 tracing 日志框架
-    // 通过 RUST_LOG 环境变量控制日志级别，默认为 info
+    // - stdout(fmt) 层：由 RUST_LOG 控制（默认 info），仅影响控制台输出
+    // - 日志缓冲层：捕获所有级别（TRACE）事件进有界缓冲，由前端配置的级别在 Layer 内动态过滤
+    //   ⇒ 前端可实时切换级别，且不会让 stdout 变吵
+    let log_buffer = log_export::LogBuffer::new(2000);
     tracing_subscriber::registry()
-        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
-        .with(tracing_subscriber::fmt::layer().with_target(false))
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_target(false)
+                .with_filter(
+                    EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+                ),
+        )
+        .with(
+            log_export::LogBufferLayer::new(std::sync::Arc::clone(&log_buffer))
+                .with_filter(tracing_subscriber::filter::LevelFilter::TRACE),
+        )
         .init();
 
     // 解析命令行参数
@@ -194,6 +207,13 @@ async fn main() -> Result<()> {
     let webhook_sender = Arc::new(WebhookSender::new(Arc::clone(&config_manager)));
     let sms_push_sender = Arc::new(SmsPushSender::new(Arc::clone(&config_manager)));
     let frontend_runtime = Arc::new(FrontendRuntime::new());
+
+    // 同步日志导出配置到缓冲，并启动远程上报 shipper（方向A）
+    log_buffer.update_config(&config_manager.get_log_export());
+    let _log_shipper = log_export::LogShipper::spawn(
+        Arc::clone(&config_manager),
+        Arc::clone(&log_buffer),
+    );
     
     // 启动 SMS 监听线程
     {
@@ -254,6 +274,7 @@ async fn main() -> Result<()> {
         webhook_sender,
         sms_push_sender,
         frontend_runtime,
+        log_buffer,
     );
 
     // Build routes - 使用统一的 AppState
@@ -332,6 +353,12 @@ async fn main() -> Result<()> {
         .route("/api/sms-push/test", post(test_sms_push_handler).options(options_handler))
         .route("/api/refresh/config", get(get_refresh_config_handler).post(set_refresh_config_handler).options(options_handler))
         .route("/api/refresh/heartbeat", post(frontend_refresh_heartbeat_handler).options(options_handler))
+        // ========== 日志导出/上报接口 ==========
+        .route("/api/logs/config", get(get_logs_config_handler).post(set_logs_config_handler).options(options_handler))
+        .route("/api/logs/stream", get(logs_stream_handler).options(options_handler))
+        .route("/api/logs/export", get(logs_export_handler).options(options_handler))
+        .route("/api/logs/test", post(test_logs_remote_handler).options(options_handler))
+        .route("/api/logs/clear", post(clear_logs_handler).options(options_handler))
         // ========== OTA 更新接口 ==========
         .route("/api/ota/status", get(get_ota_status_handler).options(options_handler))
         .route("/api/ota/upload", post(upload_ota_handler).options(options_handler)
