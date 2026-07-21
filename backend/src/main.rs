@@ -61,17 +61,17 @@ use state::{AppState, FrontendRuntime};
 use webhook::WebhookSender;
 
 /// 获取二进制文件同级目录下的 www 目录路径
-fn get_www_dir() -> PathBuf {
-    // 获取当前可执行文件的路径
-    let exe_path = std::env::current_exe()
-        .expect("Failed to get executable path");
-    
-    // 获取可执行文件所在目录
-    let exe_dir = exe_path.parent()
-        .expect("Failed to get executable directory");
-    
-    // 拼接 www 目录
-    exe_dir.join("www")
+///
+/// 启动后缓存于 OnceLock，永不 panic（panic=abort 下任何 panic 都会终止进程）。
+/// `current_exe()` 失败（如 OTA 覆盖二进制期间）时退化为相对 "www"。
+fn get_www_dir() -> &'static PathBuf {
+    static WWW_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    WWW_DIR.get_or_init(|| {
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.join("www")))
+            .unwrap_or_else(|| PathBuf::from("www"))
+    })
 }
 
 /// SPA fallback handler - 对于所有前端路由返回 index.html
@@ -145,6 +145,27 @@ struct Args {
     host: String,
 }
 
+/// 带退避重试连接 system D-Bus。
+///
+/// 设备冷启动时 ofono / system bus 可能尚未就绪，直接 `Connection::system().await?`
+/// 会让 `main` 返回 `Err` → 进程退出、`loader.sh` 不重启 → 无 Web UI 且数据自动连接/watchdog 也丢。
+/// 这里重试到连上为止（指数退避，封顶 5s），覆盖启动竞态；仅在持续不可用时报错退出。
+async fn connect_system_dbus() -> Result<Connection> {
+    let mut delay = std::time::Duration::from_millis(500);
+    loop {
+        match Connection::system().await {
+            Ok(c) => return Ok(c),
+            Err(e) => {
+                warn!(error = %e, ?delay, "system D-Bus 暂不可用，重试");
+                tokio::time::sleep(delay).await;
+                if delay < std::time::Duration::from_secs(5) {
+                    delay = delay * 2;
+                }
+            }
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // 初始化 tracing 日志框架
@@ -170,8 +191,8 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     let bind_addr = format!("{}:{}", args.host, args.port);
 
-    // Connect to system D-Bus
-    let dbus_conn = Arc::new(Connection::system().await?);
+    // Connect to system D-Bus（重试，覆盖 ofono 启动竞态）
+    let dbus_conn = Arc::new(connect_system_dbus().await?);
     
     // 创建 SMS 数据库（存储在可执行文件同级目录）
     let db_path = get_persistent_root_dir().join("data.db");
@@ -215,24 +236,26 @@ async fn main() -> Result<()> {
         Arc::clone(&log_buffer),
     );
     
-    // 启动 SMS 监听线程
+    // 启动 SMS 监听线程（连接在任务内获取 + 失败自动重连，不阻塞主启动）
     {
-        let conn_clone = Connection::system().await?;
         let db_clone = Arc::clone(&app_db);
         let webhook_clone = Arc::clone(&webhook_sender);
         let sms_push_clone = Arc::clone(&sms_push_sender);
         tokio::spawn(async move {
-            let _ = sms_listener::start_sms_listener(conn_clone, db_clone, webhook_clone, sms_push_clone).await;
+            let _ = sms_listener::run_sms_listener_with_reconnect(
+                db_clone, webhook_clone, sms_push_clone,
+            ).await;
         });
     }
-    
-    // 启动电话监听线程（包括通话记录存储）
+
+    // 启动电话监听线程（包括通话记录存储；连接在任务内获取 + 失败自动重连）
     {
-        let conn_clone = Connection::system().await?;
         let db_clone = Arc::clone(&app_db);
         let webhook_clone = Arc::clone(&webhook_sender);
         tokio::spawn(async move {
-            let _ = sms_listener::start_call_listener(conn_clone, db_clone, webhook_clone).await;
+            let _ = sms_listener::run_call_listener_with_reconnect(
+                db_clone, webhook_clone,
+            ).await;
         });
     }
     

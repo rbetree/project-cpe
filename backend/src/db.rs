@@ -68,7 +68,15 @@ pub struct Database {
 impl Database {
     /// 创建或打开数据库
     pub fn new(db_path: PathBuf) -> Result<Self> {
-        let conn = Connection::open(db_path)?;
+        // 打开失败（/data 只读/满/损坏）时退化为内存 DB，保住 HTTP/D-Bus 控制面。
+        // 代价：SMS/通话历史不持久化（重启丢失）。避免因 DB 打不开导致整个服务起不来。
+        let conn = match Connection::open(&db_path) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(error = %e, path = ?db_path, "打开持久化 data.db 失败，退化为内存 DB（历史将不持久化）");
+                Connection::open_in_memory()?
+            }
+        };
         
         // 创建短信表（如果不存在）
         conn.execute(
@@ -147,9 +155,12 @@ impl Database {
             params![direction, phone_number, content, timestamp, status, pdu],
         )?;
         
-        Ok(conn.last_insert_rowid())
+        let id = conn.last_insert_rowid();
+        drop(conn);
+        self.maybe_cleanup();
+        Ok(id)
     }
-    
+
     /// 更新短信状态
     #[allow(dead_code)]
     pub fn update_sms_status(&self, id: i64, status: &str) -> Result<()> {
@@ -252,7 +263,6 @@ impl Database {
     }
     
     /// 删除旧短信（保留最近 N 条）
-    #[allow(dead_code)]
     pub fn cleanup_old_sms(&self, keep_count: i64) -> Result<usize> {
         let conn = self.conn.lock().unwrap();
         let deleted = conn.execute(
@@ -262,6 +272,30 @@ impl Database {
             params![keep_count],
         )?;
         Ok(deleted)
+    }
+
+    /// 删除旧通话记录（保留最近 N 条）
+    pub fn cleanup_old_calls(&self, keep_count: i64) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        let deleted = conn.execute(
+            "DELETE FROM call_history WHERE id NOT IN (
+                SELECT id FROM call_history ORDER BY start_time DESC LIMIT ?1
+            )",
+            params![keep_count],
+        )?;
+        Ok(deleted)
+    }
+
+    /// 每 N 次插入触发一次清理，防止 data.db 在嵌入式设备上无界增长（各保留 2000 条）。
+    fn maybe_cleanup(&self) {
+        const CLEANUP_EVERY: u64 = 64;
+        const KEEP_ROWS: i64 = 2000;
+        static INSERT_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = INSERT_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if n % CLEANUP_EVERY == 0 {
+            let _ = self.cleanup_old_sms(KEEP_ROWS);
+            let _ = self.cleanup_old_calls(KEEP_ROWS);
+        }
     }
     
     /// 删除所有短信
@@ -288,8 +322,11 @@ impl Database {
              VALUES (?1, ?2, 0, ?3, ?4)",
             params![direction, phone_number, start_time, answered as i32],
         )?;
-        
-        Ok(conn.last_insert_rowid())
+
+        let id = conn.last_insert_rowid();
+        drop(conn);
+        self.maybe_cleanup();
+        Ok(id)
     }
     
     /// 更新通话记录（通话结束时调用）

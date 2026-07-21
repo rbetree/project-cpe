@@ -230,8 +230,15 @@ pub async fn start_sms_listener(
     loop {
         let msg = match stream.next().await {
             Some(Ok(msg)) => msg,
-            Some(Err(_)) => continue,
-            None => continue,
+            Some(Err(_)) => {
+                // 瞬时错误：短暂 sleep 避免 busy-spin 占满 CPU
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                continue;
+            }
+            None => {
+                // 流结束（D-Bus 连接断开）→ 返回，由外层 run_*_with_reconnect 重连
+                return Ok(());
+            }
         };
         
         // Check if it's a signal message
@@ -303,13 +310,25 @@ pub async fn start_call_listener(conn: Connection, db: Arc<Database>, webhook: A
     
     let mut stream = MessageStream::from(&conn);
     
+    let mut sweep_ticker = tokio::time::interval(std::time::Duration::from_secs(300));
     loop {
-        let msg = match stream.next().await {
-            Some(Ok(msg)) => msg,
-            Some(Err(_)) => continue,
-            None => continue,
+        // 周期清扫 ACTIVE_CALLS（防漏 CallRemoved 导致内存泄漏）与流消息并行
+        let msg = tokio::select! {
+            biased;
+            _ = sweep_ticker.tick() => {
+                sweep_stale_active_calls();
+                continue;
+            }
+            m = stream.next() => match m {
+                Some(Ok(msg)) => msg,
+                Some(Err(_)) => {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    continue;
+                }
+                None => return Ok(()),
+            },
         };
-        
+
         // Process call-related signals
         if let Some(member) = msg.header().member() {
             let member_str = member.as_str();
@@ -417,5 +436,68 @@ pub async fn start_call_listener(conn: Connection, db: Arc<Database>, webhook: A
                 _ => {}
             }
         }
+    }
+}
+
+/// 清扫 ACTIVE_CALLS 中超过 4 小时的陈旧条目（防漏 CallRemoved 的内存泄漏）
+fn sweep_stale_active_calls() {
+    let mut active = ACTIVE_CALLS.lock().unwrap_or_else(|e| e.into_inner());
+    let now = Utc::now();
+    let max_age = chrono::Duration::hours(4);
+    active.retain(|_, c| (now - c.start_time) < max_age);
+}
+
+/// SMS 监听器：连接 + 监听，失败自动重连（指数退避，封顶 30s）
+pub async fn run_sms_listener_with_reconnect(
+    db: Arc<Database>,
+    webhook: Arc<WebhookSender>,
+    sms_push: Arc<SmsPushSender>,
+) {
+    let mut delay = std::time::Duration::from_millis(500);
+    loop {
+        let conn = match Connection::system().await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(error = %e, ?delay, "SMS listener: D-Bus 不可用，重试");
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(std::time::Duration::from_secs(30));
+                continue;
+            }
+        };
+        match start_sms_listener(
+            conn,
+            Arc::clone(&db),
+            Arc::clone(&webhook),
+            Arc::clone(&sms_push),
+        )
+        .await
+        {
+            Ok(()) => tracing::warn!("SMS listener 流结束，重连"),
+            Err(e) => tracing::warn!(error = %e, "SMS listener 错误，重连"),
+        }
+        tokio::time::sleep(delay).await;
+        delay = (delay * 2).min(std::time::Duration::from_secs(30));
+    }
+}
+
+/// 通话监听器：连接 + 监听，失败自动重连
+pub async fn run_call_listener_with_reconnect(db: Arc<Database>, webhook: Arc<WebhookSender>) {
+    let mut delay = std::time::Duration::from_millis(500);
+    loop {
+        let conn = match Connection::system().await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(error = %e, ?delay, "Call listener: D-Bus 不可用，重试");
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(std::time::Duration::from_secs(30));
+                continue;
+            }
+        };
+        match start_call_listener(conn, Arc::clone(&db), Arc::clone(&webhook)).await {
+            Ok(()) => tracing::warn!("Call listener 流结束，重连"),
+            Err(e) => tracing::warn!(error = %e, "Call listener 错误，重连"),
+        }
+        tokio::time::sleep(delay).await;
+        delay = (delay * 2).min(std::time::Duration::from_secs(30));
     }
 }

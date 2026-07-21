@@ -23,6 +23,17 @@ use tracing::{info, warn};
 const DEFAULT_LOADER_SCRIPT: &str = r#"#!/bin/sh
 /home/root/ttyd/start.sh &
 /home/root/udx710 -p 80 &
+udx710_pid=$!
+# OTA 防砖看门狗（后台）：新二进制 8 秒内退出（panic=abort/启动失败）则回退 .knowngood
+( sleep 8
+  if ! kill -0 "$udx710_pid" 2>/dev/null; then
+    if [ -x /home/root/udx710.knowngood ]; then
+      cp /home/root/udx710.knowngood /home/root/udx710
+      chmod 755 /home/root/udx710
+      /home/root/udx710 -p 80 &
+    fi
+  fi
+) &
 "#;
 const LOADER_SCRIPT_PATH: &str = "/home/root/loader.sh";
 const INIT_SCRIPT_PATH: &str = "/home/root/init.sh";

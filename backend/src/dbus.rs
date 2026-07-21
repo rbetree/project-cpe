@@ -189,16 +189,26 @@ where
 /// # Returns
 /// AT 指令的响应结果
 ///
-/// 注：本函数被大量 zbus::Result 上下文以 `?` 调用，故保持 zbus::Result 返回类型，
-/// 暂未接入 with_serial_timed（超时保护）。看门狗恢复路径已由 set_data_connection /
-/// set_modem_online 的超时覆盖，不会因其 hang 而永久阻塞。AT 操作的超时保护为后续项。
+/// 已接入 `with_serial_timed`（15s 超时）：modem/oFona 卡住时不会无限期持有全局
+/// `DBUS_LOCK` 阻塞其它射频/数据命令。超时映射回 `zbus::Error::Failure` 以保持
+/// `zbus::Result` 返回类型（被大量 `?` 调用）。
 pub async fn send_at_command(conn: &Connection, cmd: &str) -> zbus::Result<String> {
-    with_serial(async {
+    with_serial_timed(async {
         let proxy = Proxy::new(conn, "org.ofono", "/ril_0", "org.ofono.Modem").await?;
         let result: String = proxy.call("SendAtcmd", &(cmd)).await?;
         Ok(result)
     })
     .await
+    .map_err(|e| match e {
+        SerialOpError::Inner(zbe) => zbe,
+        SerialOpError::Timeout => {
+            zbus::Error::Failure(format!(
+                "AT command '{}' timed out after {}s",
+                cmd,
+                SERIAL_OP_TIMEOUT.as_secs()
+            ))
+        }
+    })
 }
 
 /// 获取服务小区信息

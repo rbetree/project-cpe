@@ -170,7 +170,7 @@ export default function Logs() {
     setSuccess(null)
     try {
       const res = await api.setLogsConfig(config)
-      if (res.status === 'success') {
+      if (res.status === 'ok') {
         setSuccess('日志配置已保存并生效')
         // 重新拉取以同步丢弃统计
         await loadConfig()

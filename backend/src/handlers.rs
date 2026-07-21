@@ -2517,14 +2517,38 @@ pub async fn set_apn_handler(
 ///
 /// 通过 ping 检测 IPv4 和 IPv6 连通性
 pub async fn get_connectivity_check() -> (StatusCode, Json<ApiResponse<ConnectivityCheckResponse>>) {
-    let ipv4_result = ping_host("223.5.5.5", false);
-    let ipv6_result = ping_host("2400:3200::1", true);
-    
+    // ping 是阻塞子进程（每个 -W2 最多 ~2s，两次最多 ~4s），放 blocking 线程池，
+    // 避免在多标签页/轮询下饿死 async worker（设备仅 ~2 核）。
+    let (ipv4_result, ipv6_result) = match tokio::task::spawn_blocking(|| {
+        (ping_host("223.5.5.5", false), ping_host("2400:3200::1", true))
+    })
+    .await
+    {
+        Ok(pair) => pair,
+        Err(e) => {
+            let err = format!("ping task join failed: {e}");
+            (
+                PingResult {
+                    success: false,
+                    latency_ms: None,
+                    target: "223.5.5.5".to_string(),
+                    error: Some(err.clone()),
+                },
+                PingResult {
+                    success: false,
+                    latency_ms: None,
+                    target: "2400:3200::1".to_string(),
+                    error: Some(err),
+                },
+            )
+        }
+    };
+
     let response = ConnectivityCheckResponse {
         ipv4: ipv4_result,
         ipv6: ipv6_result,
     };
-    
+
     (
         StatusCode::OK,
         Json(ApiResponse::success_with_message("Connectivity check completed", response)),

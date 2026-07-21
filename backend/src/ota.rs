@@ -242,13 +242,30 @@ pub fn apply_ota_update(restart_now: bool) -> Result<String, String> {
     let staging_binary = Path::new(OTA_STAGING_DIR).join("udx710");
     let staging_www = Path::new(OTA_STAGING_DIR).join("www");
 
-    fs::copy(&staging_binary, OTA_BINARY_PATH)
-        .map_err(|e| format!("Failed to copy binary: {}", e))?;
+    // 1) 覆盖前备份当前（已知可用）二进制，作为回滚目标（配合 loader.sh 看门狗自动回退）
+    let knowngood_path = format!("{}.knowngood", OTA_BINARY_PATH);
+    let _ = fs::copy(OTA_BINARY_PATH, &knowngood_path);
+
+    // 2) 原子写入新二进制：先写临时文件并 sync，再 rename 覆盖。
+    //    避免 fs::copy 中途失败（磁盘满/IO 错/OOM 被杀）留下截断的 ELF → 下次启动 exec 失败变砖。
+    let staging_tmp = format!("{}.new", OTA_BINARY_PATH);
+    fs::copy(&staging_binary, &staging_tmp)
+        .map_err(|e| format!("Failed to stage new binary: {}", e))?;
+    if let Ok(f) = fs::File::open(&staging_tmp) {
+        let _ = f.sync_all();
+    }
+    fs::rename(&staging_tmp, OTA_BINARY_PATH)
+        .map_err(|e| format!("Failed to swap new binary into place: {}", e))?;
 
     Command::new("chmod")
         .args(["755", OTA_BINARY_PATH])
         .output()
         .map_err(|e| format!("Failed to chmod binary: {}", e))?;
+    // 3) 落盘最终二进制 + 全局 sync，降低断电丢数据风险
+    if let Ok(f) = fs::File::open(OTA_BINARY_PATH) {
+        let _ = f.sync_all();
+    }
+    let _ = Command::new("sync").output();
 
     let _ = fs::remove_dir_all(OTA_WWW_PATH);
     copy_dir_recursive(staging_www.to_str().unwrap_or(""), OTA_WWW_PATH)?;
@@ -258,6 +275,8 @@ pub fn apply_ota_update(restart_now: bool) -> Result<String, String> {
     let _ = fs::remove_dir_all(OTA_STAGING_DIR);
 
     if restart_now {
+        // reboot 前再次全局 sync，确保二进制/www 已落盘
+        let _ = Command::new("sync").output();
         std::thread::spawn(|| {
             std::thread::sleep(std::time::Duration::from_secs(1));
             let _ = Command::new("reboot").spawn();
