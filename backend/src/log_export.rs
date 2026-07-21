@@ -120,6 +120,10 @@ impl Visit for EventVisitor {
 }
 
 /// 有界环形缓冲 + 实时广播 + 远程 outbox。
+///
+/// 注：release 配置为 `panic = "abort"`，`catch_unwind` 在此无效。
+/// 因此所有 mutex 取锁均用 `unwrap_or_else(|e| e.into_inner())`——
+/// 即便锁被毒化也恢复出 guard，绝不 panic，避免"一条日志搞崩整个进程"。
 pub struct LogBuffer {
     /// 历史/导出用环形缓冲（条数 + 字节双上限）
     entries: Mutex<VecDeque<Arc<LogEntry>>>,
@@ -201,7 +205,7 @@ impl LogBuffer {
 
         // 1) 环形缓冲（双上限）
         {
-            let mut entries = self.entries.lock().unwrap();
+            let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
             entries.push_back(Arc::clone(&arc));
             let mut cur = self.current_bytes.load(Ordering::Relaxed);
             cur += bytes;
@@ -222,7 +226,7 @@ impl LogBuffer {
 
         // 3) 远程 outbox（仅在启用上报时入队）
         if self.shipping_enabled.load(Ordering::Relaxed) {
-            let mut outbox = self.outbox.lock().unwrap();
+            let mut outbox = self.outbox.lock().unwrap_or_else(|e| e.into_inner());
             outbox.push_back(Arc::clone(&arc));
             while outbox.len() > OUTBOX_CAP {
                 if outbox.pop_front().is_some() {
@@ -245,26 +249,26 @@ impl LogBuffer {
 
     /// 快照当前环形缓冲（导出用；按时间正序，最旧在前）。
     pub fn snapshot(&self) -> Vec<Arc<LogEntry>> {
-        self.entries.lock().unwrap().iter().cloned().collect()
+        self.entries.lock().unwrap_or_else(|e| e.into_inner()).iter().cloned().collect()
     }
 
     /// 清空环形缓冲与统计。
     pub fn clear(&self) {
-        let mut entries = self.entries.lock().unwrap();
+        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
         entries.clear();
         self.current_bytes.store(0, Ordering::Relaxed);
     }
 
     /// 从 outbox 头部取最多 n 条（shipper 用）。
     fn drain_outbox(&self, n: usize) -> Vec<Arc<LogEntry>> {
-        let mut outbox = self.outbox.lock().unwrap();
+        let mut outbox = self.outbox.lock().unwrap_or_else(|e| e.into_inner());
         let take = n.min(outbox.len());
         outbox.drain(..take).collect()
     }
 
     /// 把发送失败的批次重新塞回 outbox 头部（保持顺序），溢出则丢最新。
     fn pushback_outbox(&self, batch: Vec<Arc<LogEntry>>) {
-        let mut outbox = self.outbox.lock().unwrap();
+        let mut outbox = self.outbox.lock().unwrap_or_else(|e| e.into_inner());
         for entry in batch.into_iter().rev() {
             outbox.push_front(entry);
         }
@@ -279,7 +283,7 @@ impl LogBuffer {
 
     /// 清空 outbox（关闭上报时丢弃积压）。
     fn discard_outbox(&self) {
-        let mut outbox = self.outbox.lock().unwrap();
+        let mut outbox = self.outbox.lock().unwrap_or_else(|e| e.into_inner());
         let dropped = outbox.len();
         outbox.clear();
         if dropped > 0 {
