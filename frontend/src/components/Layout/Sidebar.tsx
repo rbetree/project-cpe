@@ -16,26 +16,22 @@ import {
   ListItemButton,
   ListItemIcon,
   ListItemText,
+  ListSubheader,
   Toolbar,
   Divider,
   Box,
   Typography,
   Link,
+  IconButton,
+  Stack,
+  Tooltip,
 } from '@mui/material'
 import {
-  Dashboard as DashboardIcon,
-  Devices as DevicesIcon,
-  SignalCellularAlt as SignalIcon,
-  Settings as SettingsIcon,
-  Terminal as TerminalIcon,
-  Phone as PhoneIcon,
-  Sms as SmsIcon,
-  GitHub as GitHubIcon,
-  WebAsset as WebTerminalIcon,
-  SystemUpdateAlt as OtaIcon,
-  RocketLaunch as InitScriptIcon,
-  Article as LogsIcon,
+  MenuOpen as MenuOpenIcon,
+  MoreVert as MoreVertIcon,
+  Refresh as RefreshIcon,
 } from '@mui/icons-material'
+import { appPages, githubLink, navGroups } from '../../navigation'
 
 interface SidebarProps {
   drawerWidth: number
@@ -43,25 +39,24 @@ interface SidebarProps {
   desktopOpen: boolean
   onClose: () => void
   isMobile: boolean
+  onMenuClick: () => void
+  onRefreshClick: () => void
+  onMenuOptionsClick: (event: React.MouseEvent<HTMLElement>) => void
 }
 
-const menuItems = [
-  { path: '/', label: '仪表盘', icon: DashboardIcon },
-  { path: '/device', label: '设备信息', icon: DevicesIcon },
-  { path: '/network', label: '网络状态', icon: SignalIcon },
-  { path: '/phone', label: '电话管理', icon: PhoneIcon },
-  { path: '/sms', label: '短信管理', icon: SmsIcon },
-  { path: '/config', label: '系统配置', icon: SettingsIcon },
-  { path: '/init-script', label: '开机脚本', icon: InitScriptIcon },
-  { path: '/ota', label: 'OTA 更新', icon: OtaIcon },
-  { path: '/at-console', label: 'AT 控制台', icon: TerminalIcon },
-  { path: '/terminal', label: 'Web 终端', icon: WebTerminalIcon },
-  { path: '/logs', label: '日志', icon: LogsIcon },
-]
-
-export default function Sidebar({ drawerWidth, mobileOpen, desktopOpen, onClose, isMobile }: SidebarProps) {
+export default function Sidebar({
+  drawerWidth,
+  mobileOpen,
+  desktopOpen,
+  onClose,
+  isMobile,
+  onMenuClick,
+  onRefreshClick,
+  onMenuOptionsClick,
+}: SidebarProps) {
   const navigate = useNavigate()
   const location = useLocation()
+  const GithubIcon = githubLink.icon
 
   const handleNavigation = (path: string): void => {
     void navigate(path)
@@ -72,35 +67,78 @@ export default function Sidebar({ drawerWidth, mobileOpen, desktopOpen, onClose,
 
   const drawer = (
     <Box sx={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
-      <Toolbar>
-        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+      <Toolbar sx={{ px: 2, justifyContent: 'space-between' }}>
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, minWidth: 0 }}>
           <Typography variant="h6" noWrap component="div" fontWeight={600}>
             UDX710
           </Typography>
         </Box>
+        <Tooltip title={isMobile ? '关闭侧边栏' : '折叠侧边栏'}>
+          <IconButton edge="end" size="small" onClick={onMenuClick}>
+            <MenuOpenIcon />
+          </IconButton>
+        </Tooltip>
       </Toolbar>
       <Divider />
-      <List sx={{ flexGrow: 1 }}>
-        {menuItems.map((item) => {
-          const IconComponent = item.icon
+      <List sx={{ flexGrow: 1, py: 1 }}>
+        {navGroups.map((group) => {
+          const groupPages = appPages.filter((page) => page.group === group.id)
+
           return (
-            <ListItem key={item.path} disablePadding>
-              <ListItemButton
-                selected={location.pathname === item.path}
-                onClick={() => handleNavigation(item.path)}
+            <Box key={group.id} component="li" sx={{ listStyle: 'none' }}>
+              <ListSubheader
+                component="div"
+                disableSticky
+                sx={{
+                  lineHeight: 2,
+                  fontSize: '0.7rem',
+                  fontWeight: 700,
+                  letterSpacing: 0,
+                  color: 'text.disabled',
+                  bgcolor: 'transparent',
+                  px: 2,
+                  pt: 1,
+                }}
               >
-                <ListItemIcon>
-                  <IconComponent />
-                </ListItemIcon>
-                <ListItemText primary={item.label} />
-              </ListItemButton>
-            </ListItem>
+                {group.label}
+              </ListSubheader>
+              {groupPages.map((item) => {
+                const IconComponent = item.icon
+
+                return (
+                  <ListItem key={item.path} disablePadding>
+                    <ListItemButton
+                      selected={location.pathname === item.path}
+                      onClick={() => handleNavigation(item.path)}
+                      sx={{ mx: 1, borderRadius: 1 }}
+                    >
+                      <ListItemIcon sx={{ minWidth: 40 }}>
+                        <IconComponent />
+                      </ListItemIcon>
+                      <ListItemText primary={item.label} />
+                    </ListItemButton>
+                  </ListItem>
+                )
+              })}
+            </Box>
           )
         })}
       </List>
       <Box sx={{ p: 2, borderTop: 1, borderColor: 'divider' }}>
+        <Stack direction="row" spacing={1} sx={{ mb: 1.5 }}>
+          <Tooltip title="刷新当前数据">
+            <IconButton size="small" onClick={onRefreshClick}>
+              <RefreshIcon fontSize="small" />
+            </IconButton>
+          </Tooltip>
+          <Tooltip title="更多选项">
+            <IconButton size="small" onClick={onMenuOptionsClick}>
+              <MoreVertIcon fontSize="small" />
+            </IconButton>
+          </Tooltip>
+        </Stack>
         <Link
-          href="https://github.com/1orz/project-cpe"
+          href={githubLink.href}
           target="_blank"
           rel="noopener noreferrer"
           sx={{
@@ -115,16 +153,16 @@ export default function Sidebar({ drawerWidth, mobileOpen, desktopOpen, onClose,
             },
           }}
         >
-          <GitHubIcon sx={{ fontSize: 16 }} />
+          <GithubIcon sx={{ fontSize: 16 }} />
           <Typography variant="caption" color="inherit">
-            1orz/project-cpe
+            {githubLink.label}
           </Typography>
         </Link>
         <Typography variant="caption" color="text.disabled" sx={{ display: 'block', mt: 0.5 }}>
           v{__APP_VERSION__} ({__GIT_BRANCH__}/{__GIT_COMMIT__})
         </Typography>
         <Typography variant="caption" color="text.disabled" sx={{ display: 'block', mt: 0.5 }}>
-          Copyright 2025 1orz
+          Copyright 2026
         </Typography>
       </Box>
     </Box>

@@ -11,6 +11,7 @@
 import { Box, Typography, IconButton, Tooltip } from '@mui/material'
 import { OpenInNew as OpenInNewIcon, Fullscreen as FullscreenIcon } from '@mui/icons-material'
 import { useState, useRef } from 'react'
+import PageContainer from '../components/Page/PageContainer'
 
 export default function Terminal() {
   const [isFullscreen, setIsFullscreen] = useState(false)
@@ -36,20 +37,11 @@ export default function Terminal() {
   }
 
   return (
-    <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
-      {/* Header */}
-      <Box
-        sx={{
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center',
-          mb: 2,
-        }}
-      >
-        <Typography variant="h5" fontWeight={600}>
-          Web Terminal
-        </Typography>
-        <Box>
+    <PageContainer
+      pageId="terminal"
+      sx={{ height: '100%' }}
+      actions={(
+        <>
           <Tooltip title="Fullscreen">
             <IconButton onClick={handleFullscreen} size="small">
               <FullscreenIcon />
@@ -60,8 +52,9 @@ export default function Terminal() {
               <OpenInNewIcon />
             </IconButton>
           </Tooltip>
-        </Box>
-      </Box>
+        </>
+      )}
+    >
 
       {/* Terminal iframe container */}
       <Box
@@ -97,7 +90,6 @@ export default function Terminal() {
       >
         ttyd @ {ttydUrl}
       </Typography>
-    </Box>
+    </PageContainer>
   )
 }
-

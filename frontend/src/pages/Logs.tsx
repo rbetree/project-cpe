@@ -37,6 +37,7 @@ import {
 } from '@mui/icons-material'
 import { api } from '../api'
 import ErrorSnackbar from '../components/ErrorSnackbar'
+import PageContainer from '../components/Page/PageContainer'
 import type { LogExportConfig, LogEntry, LogLevel } from '../api/types'
 import { LOG_LEVEL_OPTIONS } from '../api/types'
 
@@ -320,13 +321,14 @@ export default function Logs() {
   }, [config.buffer_capacity])
 
   return (
-    <Box sx={{ p: 3, display: 'flex', flexDirection: 'column', gap: 2 }}>
-      <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-        <Typography variant="h5">日志</Typography>
+    <PageContainer
+      pageId="logs"
+      actions={(
         <Button size="small" startIcon={<Refresh />} onClick={() => void handleRefresh()} disabled={loading}>
           刷新
         </Button>
-      </Box>
+      )}
+    >
 
       {loading ? (
         <Box sx={{ display: 'flex', justifyContent: 'center', py: 4 }}>
@@ -602,7 +604,7 @@ export default function Logs() {
 
       <ErrorSnackbar error={error} onClose={() => setError(null)} />
       <SuccessSnackbar message={success} onClose={() => setSuccess(null)} />
-    </Box>
+    </PageContainer>
   )
 }
 

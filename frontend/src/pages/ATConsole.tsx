@@ -24,7 +24,6 @@ import {
   type Theme,
 } from '@mui/material'
 import {
-  Computer,
   ContentCopy,
   Fingerprint,
   Send,
@@ -32,6 +31,7 @@ import {
 } from '@mui/icons-material'
 import { api } from '../api'
 import ErrorSnackbar from '../components/ErrorSnackbar'
+import PageContainer from '../components/Page/PageContainer'
 
 interface CommandHistory {
   command: string
@@ -166,20 +166,16 @@ export default function ATConsolePage() {
   const [showImeiPanel, setShowImeiPanel] = useState(false)
 
   return (
-    <Box sx={{ height: { md: 'calc(100vh - 100px)' }, display: 'flex', flexDirection: 'column' }}>
+    <PageContainer pageId="atConsole" sx={{ height: { md: 'calc(100vh - 100px)' } }}>
       {/* 错误提示 Snackbar */}
       <ErrorSnackbar error={error} onClose={() => setError(null)} />
 
       {/* 顶部：标题栏 + 清空按钮 */}
-      <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 1 }}>
-        <Box display="flex" alignItems="center" gap={1}>
-          <Computer fontSize="small" color="primary" />
-          <Typography variant="subtitle1" fontWeight={600}>AT 控制台</Typography>
+      <Box sx={{ display: 'flex', justifyContent: 'flex-end', mt: -1 }}>
+        <Box display="flex" gap={1}>
           {history.length > 0 && (
             <Chip label={history.length} size="small" color="primary" variant="outlined" />
           )}
-        </Box>
-        <Box display="flex" gap={1}>
           <Button
             variant="text"
             size="small"
@@ -418,7 +414,6 @@ export default function ATConsolePage() {
           </Button>
         </Box>
       </Paper>
-    </Box>
+    </PageContainer>
   )
 }
-

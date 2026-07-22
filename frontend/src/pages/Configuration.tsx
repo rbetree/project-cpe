@@ -52,6 +52,7 @@ import {
 } from '@mui/icons-material'
 import { api } from '../api'
 import ErrorSnackbar from '../components/ErrorSnackbar'
+import PageContainer from '../components/Page/PageContainer'
 import { useRefreshInterval } from '../contexts/RefreshContext'
 import type { UsbModeResponse, AirplaneModeResponse, WebhookConfig, SmsPushConfig, SmsPushProvider } from '../api/types'
 import { DEFAULT_SMS_TEMPLATE, DEFAULT_CALL_TEMPLATE, DEFAULT_SMS_PUSH_TITLE_TEMPLATE, DEFAULT_SMS_PUSH_BODY_TEMPLATE } from '../api/types'
@@ -497,17 +498,7 @@ export default function ConfigurationPage() {
   }
 
   return (
-    <Box>
-      {/* 页面标题 */}
-      <Box mb={3}>
-        <Typography variant="h4" gutterBottom fontWeight={600}>
-          系统配置
-        </Typography>
-        <Typography variant="body2" color="text.secondary">
-          管理设备连接、USB 模式和其他系统参数
-        </Typography>
-      </Box>
-
+    <PageContainer pageId="config">
       {/* 错误和成功提示 Snackbar */}
       <ErrorSnackbar error={error} onClose={() => setError(null)} />
       {success && (
@@ -1328,6 +1319,6 @@ export default function ConfigurationPage() {
           </AccordionDetails>
         </Accordion>
       </Box>
-    </Box>
+    </PageContainer>
   )
 }

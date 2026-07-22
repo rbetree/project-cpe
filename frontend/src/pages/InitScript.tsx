@@ -34,6 +34,7 @@ import {
 } from '@mui/icons-material'
 import { api } from '../api'
 import ErrorSnackbar from '../components/ErrorSnackbar'
+import PageContainer from '../components/Page/PageContainer'
 
 const FORMAT_CHECK_ENABLED_KEY = 'init-script-format-check-enabled'
 
@@ -350,26 +351,7 @@ export default function InitScriptPage() {
   }
 
   return (
-    <Box>
-      <Box mb={{ xs: 2.5, sm: 3 }}>
-        <Typography
-          variant="h4"
-          component="h1"
-          gutterBottom
-          fontWeight={600}
-          sx={{ fontSize: { xs: '2rem', sm: '2.25rem' }, lineHeight: 1.15 }}
-        >
-          开机脚本
-        </Typography>
-        <Typography variant="body2" color="text.secondary">
-          这里编辑的是 <code>init.sh</code> 内容。保存时会确保 <code>loader.sh</code> 末尾保留
-          {' '}
-          <code>sh /home/root/init.sh &amp;</code>
-          {' '}
-          作为固定启动入口。
-        </Typography>
-      </Box>
-
+    <PageContainer pageId="initScript">
       <ErrorSnackbar error={error} onClose={() => setError(null)} />
       {success && (
         <Snackbar
@@ -730,6 +712,6 @@ export default function InitScriptPage() {
           </CardContent>
         </Card>
       </Stack>
-    </Box>
+    </PageContainer>
   )
 }

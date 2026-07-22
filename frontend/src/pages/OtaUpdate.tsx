@@ -46,6 +46,7 @@ import {
   RestartAlt,
 } from '@mui/icons-material'
 import { api } from '../api'
+import PageContainer from '../components/Page/PageContainer'
 import type { OtaStatusResponse, OtaUploadResponse } from '../api/types'
 
 export default function OtaUpdate() {
@@ -173,17 +174,9 @@ export default function OtaUpdate() {
   }
 
   return (
-    <Box>
-      {/* 页面标题 */}
-      <Box display="flex" justifyContent="space-between" alignItems="center" mb={3}>
-        <Box>
-          <Typography variant="h4" gutterBottom fontWeight={600}>
-            OTA 更新
-          </Typography>
-          <Typography variant="body2" color="text.secondary">
-            上传并安装系统更新包
-          </Typography>
-        </Box>
+    <PageContainer
+      pageId="ota"
+      actions={(
         <Button
           variant="outlined"
           startIcon={<Refresh />}
@@ -192,7 +185,8 @@ export default function OtaUpdate() {
         >
           刷新状态
         </Button>
-      </Box>
+      )}
+    >
 
       {/* 错误/成功提示 */}
       {error && (
@@ -479,7 +473,6 @@ export default function OtaUpdate() {
           </Button>
         </DialogActions>
       </Dialog>
-    </Box>
+    </PageContainer>
   )
 }
-

@@ -72,6 +72,7 @@ import Grid from '@mui/material/Grid'
 import { api, type RadioMode, type BandLockStatus, type BandLockRequest } from '../api'
 import { useRefreshInterval } from '../contexts/RefreshContext'
 import ErrorSnackbar from '../components/ErrorSnackbar'
+import PageContainer from '../components/Page/PageContainer'
 import type { CellsResponse, OperatorListResponse, CellLocationResponse, CellLockStatusResponse, NetworkInterfaceInfo, IpAddress, ApnContext } from '../api/types'
 
 // UDX710 设备支持的频段列表
@@ -654,22 +655,12 @@ export default function NetworkPage() {
   }
 
   return (
-    <Box>
+    <PageContainer pageId="network">
       {/* 错误/成功提示 */}
       <ErrorSnackbar error={error} onClose={() => setError(null)} />
       <Snackbar open={!!success} autoHideDuration={3000} onClose={() => setSuccess(null)} anchorOrigin={{ vertical: 'top', horizontal: 'center' }}>
         <Alert severity="success" variant="filled" onClose={() => setSuccess(null)}>{success}</Alert>
       </Snackbar>
-
-      {/* 页面标题 */}
-      <Box mb={3}>
-        <Typography variant="h4" gutterBottom fontWeight={600}>
-          网络状态
-        </Typography>
-        <Typography variant="body2" color="text.secondary">
-          查看网络信息、运营商、小区数据和 QoS 参数
-        </Typography>
-      </Box>
 
       {/* Tabs 导航 */}
       <Box sx={{ borderBottom: 1, borderColor: 'divider', mb: 2 }}>
@@ -1598,6 +1589,6 @@ export default function NetworkPage() {
           </Grid>
         </Grid>
       </TabPanel>
-    </Box>
+    </PageContainer>
   );
 }

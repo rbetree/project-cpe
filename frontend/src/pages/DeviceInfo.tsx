@@ -39,6 +39,7 @@ import {
 import Grid from '@mui/material/Grid'
 import { api } from '../api'
 import ErrorSnackbar from '../components/ErrorSnackbar'
+import PageContainer from '../components/Page/PageContainer'
 import type { DeviceInfo, SimInfo, SimSlotResponse, ImeisvResponse } from '../api/types'
 
 export default function DeviceInfoPage() {
@@ -134,16 +135,7 @@ export default function DeviceInfoPage() {
   }
 
   return (
-    <Box>
-      {/* 页面标题 */}
-      <Box mb={3}>
-        <Typography variant="h4" gutterBottom fontWeight={600}>
-          设备信息
-        </Typography>
-        <Typography variant="body2" color="text.secondary">
-          查看设备详细参数和配置
-        </Typography>
-      </Box>
+    <PageContainer pageId="device">
       {/* 错误和成功提示 Snackbar */}
       <ErrorSnackbar error={error} onClose={() => setError(null)} />
       {success && (
@@ -405,6 +397,6 @@ export default function DeviceInfoPage() {
         </Grid>
 
       </Grid>
-    </Box>
+    </PageContainer>
   );
 }

@@ -13,6 +13,7 @@ import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { Box, CircularProgress } from '@mui/material'
 import { ThemeProvider } from './contexts/ThemeContext'
 import MainLayout from './components/Layout/MainLayout'
+import { appPages, type AppPageId } from './navigation'
 
 // 路由级别代码分割 - 按需加载页面组件
 const Dashboard = lazy(() => import('./pages/Dashboard'))
@@ -39,24 +40,32 @@ function PageLoading() {
 type LazyPageComponent = LazyExoticComponent<ComponentType>
 
 interface AppRouteConfig {
-  path?: string
-  index?: boolean
+  pageId: AppPageId
   component: LazyPageComponent
 }
 
 const appRoutes: AppRouteConfig[] = [
-  { index: true, component: Dashboard },
-  { path: 'device', component: DeviceInfo },
-  { path: 'network', component: Network },
-  { path: 'phone', component: Phone },
-  { path: 'sms', component: SMS },
-  { path: 'config', component: Configuration },
-  { path: 'init-script', component: InitScript },
-  { path: 'ota', component: OtaUpdate },
-  { path: 'at-console', component: ATConsole },
-  { path: 'terminal', component: Terminal },
-  { path: 'logs', component: Logs },
+  { pageId: 'dashboard', component: Dashboard },
+  { pageId: 'device', component: DeviceInfo },
+  { pageId: 'network', component: Network },
+  { pageId: 'phone', component: Phone },
+  { pageId: 'sms', component: SMS },
+  { pageId: 'config', component: Configuration },
+  { pageId: 'initScript', component: InitScript },
+  { pageId: 'ota', component: OtaUpdate },
+  { pageId: 'logs', component: Logs },
+  { pageId: 'atConsole', component: ATConsole },
+  { pageId: 'terminal', component: Terminal },
 ]
+
+function getRoutePath(pageId: AppPageId) {
+  const page = appPages.find((item) => item.id === pageId)
+  if (!page || page.path === '/') {
+    return undefined
+  }
+
+  return page.path.replace(/^\//, '')
+}
 
 function renderLazyPage(PageComponent: LazyPageComponent) {
   return (
@@ -74,9 +83,9 @@ function App() {
           <Route path="/" element={<MainLayout />}>
             {appRoutes.map((route) => (
               <Route
-                key={route.path ?? 'index'}
-                index={route.index}
-                path={route.path}
+                key={route.pageId}
+                index={getRoutePath(route.pageId) === undefined}
+                path={getRoutePath(route.pageId)}
                 element={renderLazyPage(route.component)}
               />
             ))}

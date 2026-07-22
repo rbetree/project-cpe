@@ -12,6 +12,7 @@ import { Box, LinearProgress } from '@mui/material'
 import Grid from '@mui/material/Grid'
 import { useRefreshInterval } from '@/contexts/RefreshContext'
 import ErrorSnackbar from '@/components/ErrorSnackbar'
+import PageContainer from '@/components/Page/PageContainer'
 import { useDashboardData } from './hooks/useDashboardData'
 import {
   StatusOverview,
@@ -30,7 +31,7 @@ export default function Dashboard() {
   const { initialLoading, error, setError, data, actions } = useDashboardData(refreshInterval, refreshKey)
 
   return (
-    <Box>
+    <PageContainer pageId="dashboard">
       <ErrorSnackbar error={error} onClose={() => setError(null)} />
 
       {initialLoading && (
@@ -94,6 +95,6 @@ export default function Dashboard() {
           <DeviceInfoCard deviceInfo={data.deviceInfo} systemStats={data.systemStats} />
         </Grid>
       </Grid>
-    </Box>
+    </PageContainer>
   )
 }

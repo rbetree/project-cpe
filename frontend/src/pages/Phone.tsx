@@ -72,6 +72,7 @@ import {
 } from '@mui/icons-material'
 import { api, type CallInfo, type CallVolumeResponse, type CallForwardingResponse, type CallSettingsResponse, type CallRecord, type CallStats } from '../api'
 import { useRefreshInterval } from '../contexts/RefreshContext'
+import PageContainer from '../components/Page/PageContainer'
 
 // 拨号盘按键
 const dialpadButtons = [
@@ -425,14 +426,7 @@ export default function PhonePage() {
   }
 
   return (
-    <Box>
-      <Box display="flex" alignItems="center" gap={1} mb={2}>
-        <PhoneIcon color="primary" />
-        <Typography variant="h5" fontWeight={600}>
-          电话管理
-        </Typography>
-      </Box>
-
+    <PageContainer pageId="phone">
       {/* 错误和成功提示 */}
       <Snackbar open={!!error} autoHideDuration={4000} onClose={() => setError(null)} anchorOrigin={{ vertical: 'top', horizontal: 'center' }}>
         <Alert severity="error" onClose={() => setError(null)} variant="filled">{error}</Alert>
@@ -853,6 +847,6 @@ export default function PhonePage() {
           <Button onClick={() => void handleClearHistory()} color="error" variant="contained">确认清空</Button>
         </DialogActions>
       </Dialog>
-    </Box>
+    </PageContainer>
   )
 }
