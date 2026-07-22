@@ -21,16 +21,18 @@
 
 use anyhow::Result;
 use axum::{
+    middleware::{self, Next},
     routing::get, 
     routing::post, 
     Router,
     response::{IntoResponse, Response},
-    http::{StatusCode, Uri},
-    extract::DefaultBodyLimit,
+    http::{Method, StatusCode, Uri},
+    extract::{DefaultBodyLimit, Request},
 };
 use clap::Parser;
 use std::sync::Arc;
 use std::path::PathBuf;
+use std::time::Instant;
 use tower_http::cors::{CorsLayer, Any};
 use tracing::{info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
@@ -164,6 +166,60 @@ async fn connect_system_dbus() -> Result<Connection> {
             }
         }
     }
+}
+
+async fn audit_api_request(request: Request, next: Next) -> Response {
+    let method = request.method().clone();
+    let path = request.uri().path().to_string();
+    let started_at = Instant::now();
+
+    let response = next.run(request).await;
+    let status = response.status();
+
+    if should_audit_api_request(&method, &path, status) {
+        let elapsed_ms = started_at.elapsed().as_millis() as u64;
+        if status.is_client_error() || status.is_server_error() {
+            warn!(
+                method = %method,
+                path = %path,
+                status = status.as_u16(),
+                elapsed_ms,
+                "API operation failed"
+            );
+        } else {
+            info!(
+                method = %method,
+                path = %path,
+                status = status.as_u16(),
+                elapsed_ms,
+                "API operation completed"
+            );
+        }
+    }
+
+    response
+}
+
+fn should_audit_api_request(method: &Method, path: &str, status: StatusCode) -> bool {
+    if method == Method::OPTIONS
+        || path == "/api/logs/stream"
+        || path == "/api/refresh/heartbeat"
+    {
+        return false;
+    }
+
+    if status.is_client_error() || status.is_server_error() {
+        return true;
+    }
+
+    if method != Method::GET && method != Method::HEAD {
+        return true;
+    }
+
+    matches!(
+        path,
+        "/api/connectivity" | "/api/logs/export" | "/api/network/operators/scan"
+    )
 }
 
 #[tokio::main]
@@ -388,6 +444,7 @@ async fn main() -> Result<()> {
             .layer(DefaultBodyLimit::max(50 * 1024 * 1024))) // 50MB 限制
         .route("/api/ota/apply", post(apply_ota_handler).options(options_handler))
         .route("/api/ota/cancel", post(cancel_ota_handler).options(options_handler))
+        .route_layer(middleware::from_fn(audit_api_request))
         // ========== 统一状态和中间件 ==========
         .with_state(app_state)
         .layer(cors)

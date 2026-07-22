@@ -21,6 +21,7 @@ use axum::{
 use futures_util::stream;
 use serde_json::json;
 use std::sync::Arc;
+use tracing::{info, warn};
 use zbus::Connection;
 
 use crate::{
@@ -1447,6 +1448,13 @@ pub async fn set_band_lock_handler(
     if lte_fdd_mask != 0 || lte_tdd_mask != 0 {
         let lte_cmd = build_splband_lte_command(lte_fdd_mask, lte_tdd_mask);
         if let Err(e) = send_at_command(&conn, &lte_cmd).await {
+            warn!(
+                error = %e,
+                lte_fdd_bands = ?payload.lte_fdd_bands,
+                lte_tdd_bands = ?payload.lte_tdd_bands,
+                command = %lte_cmd,
+                "Band lock: failed to apply LTE bands"
+            );
             return (
                 StatusCode::OK,
                 Json(ApiResponse::<serde_json::Value>::error(format!(
@@ -1464,6 +1472,13 @@ pub async fn set_band_lock_handler(
     if nr_fdd_mask != 0 || nr_tdd_mask != 0 {
         let nr_cmd = build_splband_nr_command(nr_fdd_mask, nr_tdd_mask);
         if let Err(e) = send_at_command(&conn, &nr_cmd).await {
+            warn!(
+                error = %e,
+                nr_fdd_bands = ?payload.nr_fdd_bands,
+                nr_tdd_bands = ?payload.nr_tdd_bands,
+                command = %nr_cmd,
+                "Band lock: failed to apply NR bands"
+            );
             return (
                 StatusCode::OK,
                 Json(ApiResponse::<serde_json::Value>::error(format!(
@@ -1492,6 +1507,10 @@ pub async fn set_band_lock_handler(
             if lte_fdd_mask != 0 || lte_tdd_mask != 0 {
                 // 格式: AT+SPLBAND=1,0,<TDD>,0,<FDD>,0 (6 参数)
                 if let Err(e) = send_at_command(&conn, "AT+SPLBAND=1,0,0,0,0,0").await {
+                    warn!(
+                        error = %e,
+                        "Band lock: failed to unlock LTE bands"
+                    );
                     return (
                         StatusCode::OK,
                         Json(ApiResponse::<serde_json::Value>::error(format!(
@@ -1512,6 +1531,10 @@ pub async fn set_band_lock_handler(
             // 只有当前有 NR 锁定时才执行解锁
             if nr_fdd_mask != 0 || nr_tdd_mask != 0 {
                 if let Err(e) = send_at_command(&conn, "AT+SPLBAND=2,0,0,0,0").await {
+                    warn!(
+                        error = %e,
+                        "Band lock: failed to unlock NR bands"
+                    );
                     return (
                         StatusCode::OK,
                         Json(ApiResponse::<serde_json::Value>::error(format!(
@@ -1536,6 +1559,12 @@ pub async fn set_band_lock_handler(
         } else {
             "当前没有锁定的频段，无需解锁"
         };
+
+        info!(
+            lte_unlocked,
+            nr_unlocked,
+            "Band lock: unlock request completed"
+        );
         
         return (
             StatusCode::OK,
@@ -1556,6 +1585,18 @@ pub async fn set_band_lock_handler(
     } else {
         "NR 频段锁定已应用"
     };
+
+    info!(
+        lte_fdd_bands = ?payload.lte_fdd_bands,
+        lte_tdd_bands = ?payload.lte_tdd_bands,
+        nr_fdd_bands = ?payload.nr_fdd_bands,
+        nr_tdd_bands = ?payload.nr_tdd_bands,
+        lte_fdd_mask,
+        lte_tdd_mask,
+        nr_fdd_mask,
+        nr_tdd_mask,
+        "Band lock: apply request completed"
+    );
 
     (
         StatusCode::OK,

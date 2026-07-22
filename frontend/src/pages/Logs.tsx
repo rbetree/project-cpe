@@ -73,6 +73,18 @@ const LEVEL_COLOR: Record<string, 'error' | 'warning' | 'info' | 'default' | 'su
 // 浏览器侧保留的最大条数（防止内存膨胀；设备侧另由缓冲容量约束）
 const MAX_VIEWER_ENTRIES = 1000
 
+function isLogEntry(value: unknown): value is LogEntry {
+  if (!value || typeof value !== 'object') return false
+  const entry = value as Partial<LogEntry>
+  return (
+    typeof entry.ts === 'string' &&
+    typeof entry.level === 'string' &&
+    typeof entry.target === 'string' &&
+    typeof entry.message === 'string' &&
+    typeof entry.fields === 'string'
+  )
+}
+
 export default function Logs() {
   const [config, setConfig] = useState<LogExportConfig>(DEFAULT_CONFIG)
   const [loading, setLoading] = useState(true)
@@ -97,13 +109,15 @@ export default function Logs() {
     pausedRef.current = paused
   }, [paused])
 
-  const loadConfig = useCallback(async () => {
+  const loadConfig = useCallback(async (): Promise<LogExportConfig | null> => {
     setLoading(true)
     setError(null)
+    let nextConfig: LogExportConfig | null = null
     try {
       const res = await api.getLogsConfig()
       if (res.data) {
-        setConfig(res.data)
+        nextConfig = res.data
+        setConfig(nextConfig)
         setDroppedOverflow(res.data.dropped_overflow ?? 0)
         setDroppedRemote(res.data.dropped_remote ?? 0)
       }
@@ -112,11 +126,40 @@ export default function Logs() {
     } finally {
       setLoading(false)
     }
+    return nextConfig
+  }, [])
+
+  const loadSnapshot = useCallback(async () => {
+    try {
+      const blob = await api.exportLogs('json')
+      const text = await blob.text()
+      const parsed = JSON.parse(text) as unknown
+      if (!Array.isArray(parsed)) {
+        throw new Error('日志快照格式无效')
+      }
+      const snapshot = parsed.filter(isLogEntry).slice(-MAX_VIEWER_ENTRIES)
+      setEntries(snapshot)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    }
   }, [])
 
   useEffect(() => {
     void loadConfig()
   }, [loadConfig])
+
+  useEffect(() => {
+    if (!loading && config.viewer_enabled) {
+      void loadSnapshot()
+    }
+  }, [config.viewer_enabled, loadSnapshot, loading])
+
+  const handleRefresh = useCallback(async () => {
+    const nextConfig = await loadConfig()
+    if ((nextConfig ?? config).viewer_enabled) {
+      await loadSnapshot()
+    }
+  }, [config, loadConfig, loadSnapshot])
 
   // SSE 实时流
   useEffect(() => {
@@ -246,7 +289,7 @@ export default function Logs() {
     <Box sx={{ p: 3, display: 'flex', flexDirection: 'column', gap: 2 }}>
       <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
         <Typography variant="h5">日志</Typography>
-        <Button size="small" startIcon={<Refresh />} onClick={() => void loadConfig()} disabled={loading}>
+        <Button size="small" startIcon={<Refresh />} onClick={() => void handleRefresh()} disabled={loading}>
           刷新
         </Button>
       </Box>
