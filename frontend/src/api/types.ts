@@ -709,7 +709,7 @@ export interface LogEntry {
   fields: string
 }
 
-// 日志导出配置（方向A 远程上报 + 方向B 现场查看/导出）
+// 日志导出配置
 export interface LogExportConfig {
   remote_enabled: boolean
   remote_url: string
