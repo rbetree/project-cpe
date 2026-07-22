@@ -8,10 +8,10 @@
  *
  * Copyright (c) 2025 by 1orz, All Rights Reserved.
  */
+import { useId } from 'react'
 import { Box, Card, CardContent, Typography, Stack, Chip, Paper, useTheme, type Theme } from '@mui/material'
 import { alpha } from '@/utils/theme'
 import { Speed, ArrowDownward, ArrowUpward } from '@mui/icons-material'
-import { SparkLineChart } from '@mui/x-charts/SparkLineChart'
 import { formatBytes, formatSpeed } from '../utils'
 import { SPEED_HISTORY_MAX_POINTS, type InterfaceSpeedHistory } from '../hooks/useDashboardData'
 import type { SystemStatsResponse } from '@/api/types'
@@ -19,6 +19,57 @@ import type { SystemStatsResponse } from '@/api/types'
 interface NetworkSpeedProps {
   systemStats: SystemStatsResponse | null
   speedHistory: Record<string, InterfaceSpeedHistory>
+}
+
+function SparkLine({
+  data,
+  height = 40,
+  color,
+  max,
+}: {
+  data: number[]
+  height?: number
+  color: string
+  max: number
+}) {
+  const id = useId()
+  if (data.length < 2) return null
+
+  const minVal = 0
+  const maxVal = max || Math.max(...data, 1)
+  const range = maxVal - minVal || 1
+
+  const viewWidth = Math.max(data.length - 1, 1)
+
+  const linePoints = data
+    .map((value, index) => {
+      const x = (index / (data.length - 1)) * viewWidth
+      const y = height - ((value - minVal) / range) * height
+      return `${x},${y}`
+    })
+    .join(' ')
+
+  const areaPoints = `0,${height} ${linePoints} ${viewWidth},${height}`
+
+  return (
+    <svg width="100%" height={height} viewBox={`0 0 ${viewWidth} ${height}`} preserveAspectRatio="none">
+      <defs>
+        <linearGradient id={`${id}-gradient`} x1="0" x2="0" y1="0" y2="1">
+          <stop offset="0%" stopColor={color} stopOpacity={0.3} />
+          <stop offset="100%" stopColor={color} stopOpacity={0.02} />
+        </linearGradient>
+      </defs>
+      <polyline points={areaPoints} fill={`url(#${id}-gradient)`} stroke="none" />
+      <polyline
+        points={linePoints}
+        fill="none"
+        stroke={color}
+        strokeWidth={1.5}
+        strokeLinejoin="round"
+        strokeLinecap="round"
+      />
+    </svg>
+  )
 }
 
 export function NetworkSpeed({ systemStats, speedHistory }: NetworkSpeedProps) {
@@ -87,14 +138,11 @@ export function NetworkSpeed({ systemStats, speedHistory }: NetworkSpeedProps) {
                     </Box>
                     {rxData.length > 1 && (
                       <Box sx={{ height: 40, width: '100%' }}>
-                        <SparkLineChart
+                        <SparkLine
                           data={rxData}
                           height={40}
-                          area
-                          curve="natural"
                           color={(theme.palette.success as { main: string }).main}
-                          yAxis={{ min: 0, max: maxSpeed * 1.1 }}
-                          margin={{ top: 2, bottom: 2, left: 0, right: 0 }}
+                          max={maxSpeed * 1.1}
                         />
                       </Box>
                     )}
@@ -123,14 +171,11 @@ export function NetworkSpeed({ systemStats, speedHistory }: NetworkSpeedProps) {
                     </Box>
                     {txData.length > 1 && (
                       <Box sx={{ height: 40, width: '100%' }}>
-                        <SparkLineChart
+                        <SparkLine
                           data={txData}
                           height={40}
-                          area
-                          curve="natural"
                           color={(theme.palette.primary as { main: string }).main}
-                          yAxis={{ min: 0, max: maxSpeed * 1.1 }}
-                          margin={{ top: 2, bottom: 2, left: 0, right: 0 }}
+                          max={maxSpeed * 1.1}
                         />
                       </Box>
                     )}

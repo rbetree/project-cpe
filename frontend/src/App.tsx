@@ -10,10 +10,8 @@
  */
 import { lazy, Suspense, type ComponentType, type LazyExoticComponent } from 'react'
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
-import { QueryClientProvider } from '@tanstack/react-query'
 import { Box, CircularProgress } from '@mui/material'
 import { ThemeProvider } from './contexts/ThemeContext'
-import { queryClient } from './lib/queryClient'
 import MainLayout from './components/Layout/MainLayout'
 
 // 路由级别代码分割 - 按需加载页面组件
@@ -70,27 +68,25 @@ function renderLazyPage(PageComponent: LazyPageComponent) {
 
 function App() {
   return (
-    <QueryClientProvider client={queryClient}>
-      <ThemeProvider>
-        <BrowserRouter>
-          <Routes>
-            <Route path="/" element={<MainLayout />}>
-              {appRoutes.map((route) => (
-                <Route
-                  key={route.path ?? 'index'}
-                  index={route.index}
-                  path={route.path}
-                  element={renderLazyPage(route.component)}
-                />
-              ))}
-              {/* 旧路由重定向到网络状态页面 */}
-              <Route path="network-interfaces" element={<Navigate to="/network" replace />} />
-              <Route path="band-lock" element={<Navigate to="/network" replace />} />
-            </Route>
-          </Routes>
-        </BrowserRouter>
-      </ThemeProvider>
-    </QueryClientProvider>
+    <ThemeProvider>
+      <BrowserRouter>
+        <Routes>
+          <Route path="/" element={<MainLayout />}>
+            {appRoutes.map((route) => (
+              <Route
+                key={route.path ?? 'index'}
+                index={route.index}
+                path={route.path}
+                element={renderLazyPage(route.component)}
+              />
+            ))}
+            {/* 旧路由重定向到网络状态页面 */}
+            <Route path="network-interfaces" element={<Navigate to="/network" replace />} />
+            <Route path="band-lock" element={<Navigate to="/network" replace />} />
+          </Route>
+        </Routes>
+      </BrowserRouter>
+    </ThemeProvider>
   )
 }
 
