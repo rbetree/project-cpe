@@ -4,9 +4,9 @@
  * @LastEditors: 1orz cloudorzi@gmail.com
  * @LastEditTime: 2025-12-13 12:45:58
  * @FilePath: /udx710-backend/backend/src/config.rs
- * @Description: 
- * 
- * Copyright (c) 2025 by 1orz, All Rights Reserved. 
+ * @Description:
+ *
+ * Copyright (c) 2025 by 1orz, All Rights Reserved.
  */
 //! 配置管理模块
 //!
@@ -15,8 +15,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use tracing::{info, warn};
 
@@ -49,11 +48,11 @@ pub struct WebhookConfig {
     #[serde(default)]
     pub headers: HashMap<String, String>,
     #[serde(default)]
-    pub secret: String,  // 可选的签名密钥
+    pub secret: String, // 可选的签名密钥
     #[serde(default = "default_sms_template")]
-    pub sms_template: String,  // 短信 payload 模板
+    pub sms_template: String, // 短信 payload 模板
     #[serde(default = "default_call_template")]
-    pub call_template: String,  // 通话 payload 模板
+    pub call_template: String, // 通话 payload 模板
 }
 
 /// 默认短信模板 (飞书机器人格式)
@@ -63,7 +62,8 @@ fn default_sms_template() -> String {
   "content": {
     "text": "📱 短信通知\n发送方: {{phone_number}}\n内容: {{content}}\n时间: {{timestamp}}"
   }
-}"#.to_string()
+}"#
+    .to_string()
 }
 
 /// 默认通话模板 (飞书机器人格式)
@@ -219,7 +219,7 @@ pub fn parse_level(s: &str) -> Option<tracing::Level> {
 /// 日志导出/上报配置（方向A 远程上报 + 方向B 现场查看/导出）
 ///
 /// 设备内存受限：整个日志**不落盘**，只在内存中维护一个**严格有界**的环形缓冲。
-/// - 缓冲容量受 `buffer_capacity`（条数）与 LogBuffer 内部硬字节上限（1.5 MiB）双重夹逼。
+/// - 缓冲容量受 `buffer_capacity`（条数）与 LogBuffer 内部硬字节上限（1 MiB）双重夹逼。
 /// - 远程上报（方向A）按 batch/flush 异步 POST 到外部端点，复用 reqwest；离线时有界重试、丢旧+计数。
 /// - 现场查看（方向B）通过 SSE 实时推流 + 导出接口暴露给前端，持久化落在操作者浏览器/磁盘。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -248,7 +248,7 @@ pub struct LogExportConfig {
     /// 现场查看最低级别
     #[serde(default = "default_log_viewer_level")]
     pub viewer_level: String,
-    /// 环形缓冲条数上限（同时受内部 1.5 MiB 字节硬上限约束）
+    /// 环形缓冲条数上限（同时受内部 1 MiB 字节硬上限约束）
     #[serde(default = "default_log_buffer_capacity")]
     pub buffer_capacity: usize,
 }
@@ -292,10 +292,7 @@ impl LogExportConfig {
     /// 钳到安全范围，保证内存预算（峰值 ≤ 2MB）
     pub fn sanitize(mut self) -> Self {
         self.remote_url = self.remote_url.trim().to_string();
-        if !matches!(
-            parse_level(&self.remote_level),
-            Some(_)
-        ) {
+        if !matches!(parse_level(&self.remote_level), Some(_)) {
             self.remote_level = default_log_level();
         }
         if parse_level(&self.viewer_level).is_none() {
@@ -303,7 +300,7 @@ impl LogExportConfig {
         }
         self.batch_size = self.batch_size.clamp(1, 500);
         self.flush_interval_ms = self.flush_interval_ms.clamp(500, 60_000);
-        // 条数上限：即便用户填很大，LogBuffer 的 1.5MiB 字节硬顶仍会兜底
+        // 条数上限：即便用户填很大，LogBuffer 的 1MiB 字节硬顶仍会兜底
         self.buffer_capacity = self.buffer_capacity.clamp(100, 10_000);
         self
     }
@@ -322,7 +319,6 @@ pub struct AppConfig {
     pub log_export: LogExportConfig,
 }
 
-
 /// 配置管理器
 pub struct ConfigManager {
     config: Arc<RwLock<AppConfig>>,
@@ -334,19 +330,17 @@ impl ConfigManager {
     pub fn new(config_path: PathBuf) -> Self {
         let config = if config_path.exists() {
             match fs::read_to_string(&config_path) {
-                Ok(content) => {
-                    match serde_json::from_str::<AppConfig>(&content) {
-                        Ok(cfg) => AppConfig {
-                            refresh: cfg.refresh.sanitize(),
-                            log_export: cfg.log_export.clone().sanitize(),
-                            ..cfg
-                        },
-                        Err(e) => {
-                            warn!(error = %e, "Failed to parse config file, using defaults");
-                            AppConfig::default()
-                        }
+                Ok(content) => match serde_json::from_str::<AppConfig>(&content) {
+                    Ok(cfg) => AppConfig {
+                        refresh: cfg.refresh.sanitize(),
+                        log_export: cfg.log_export.clone().sanitize(),
+                        ..cfg
+                    },
+                    Err(e) => {
+                        warn!(error = %e, "Failed to parse config file, using defaults");
+                        AppConfig::default()
                     }
-                }
+                },
                 Err(e) => {
                     warn!(error = %e, "Failed to read config file, using defaults");
                     AppConfig::default()
@@ -361,129 +355,154 @@ impl ConfigManager {
             config: Arc::new(RwLock::new(config)),
             config_path,
         };
-        
+
         // 保存默认配置（如果文件不存在）
         if !manager.config_path.exists() {
             let _ = manager.save();
         }
-        
+
         manager
     }
-    
+
     /// 获取当前配置
     #[allow(dead_code)]
     pub fn get(&self) -> AppConfig {
-        self.config.read().unwrap().clone()
+        self.config
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
-    
+
     /// 获取 Webhook 配置
     pub fn get_webhook(&self) -> WebhookConfig {
-        self.config.read().unwrap().webhook.clone()
+        self.config
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .webhook
+            .clone()
     }
-    
+
     /// 更新 Webhook 配置
     pub fn set_webhook(&self, webhook: WebhookConfig) -> Result<(), String> {
-        {
-            let mut config = self.config.write().unwrap();
-            config.webhook = webhook;
-        }
-        self.save()
+        let mut config = self.config.write().unwrap_or_else(|e| e.into_inner());
+        let mut next = config.clone();
+        next.webhook = webhook;
+        Self::save_to_path(&self.config_path, &next)?;
+        *config = next;
+        Ok(())
     }
 
     pub fn get_sms_push(&self) -> SmsPushConfig {
-        self.config.read().unwrap().sms_push.clone()
+        self.config
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .sms_push
+            .clone()
     }
 
     pub fn set_sms_push(&self, sms_push: SmsPushConfig) -> Result<(), String> {
-        {
-            let mut config = self.config.write().unwrap();
-            config.sms_push = sms_push;
-        }
-        self.save()
+        let mut config = self.config.write().unwrap_or_else(|e| e.into_inner());
+        let mut next = config.clone();
+        next.sms_push = sms_push;
+        Self::save_to_path(&self.config_path, &next)?;
+        *config = next;
+        Ok(())
     }
 
     pub fn get_refresh(&self) -> RefreshConfig {
-        self.config.read().unwrap().refresh.clone().sanitize()
+        self.config
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .refresh
+            .clone()
+            .sanitize()
     }
 
     pub fn set_refresh(&self, refresh: RefreshConfig) -> Result<(), String> {
-        {
-            let mut config = self.config.write().unwrap();
-            config.refresh = refresh.sanitize();
-        }
-        self.save()
+        let mut config = self.config.write().unwrap_or_else(|e| e.into_inner());
+        let mut next = config.clone();
+        next.refresh = refresh.sanitize();
+        Self::save_to_path(&self.config_path, &next)?;
+        *config = next;
+        Ok(())
     }
 
     pub fn get_log_export(&self) -> LogExportConfig {
         self.config
             .read()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .log_export
             .clone()
             .sanitize()
     }
 
-    pub fn set_log_export(&self, log_export: LogExportConfig) -> Result<(), String> {
-        {
-            let mut config = self.config.write().unwrap();
-            config.log_export = log_export.sanitize();
-        }
-        self.save()
+    pub fn set_log_export(&self, log_export: LogExportConfig) -> Result<LogExportConfig, String> {
+        let sanitized = log_export.sanitize();
+        let mut config = self.config.write().unwrap_or_else(|e| e.into_inner());
+        let mut next = config.clone();
+        next.log_export = sanitized.clone();
+        Self::save_to_path(&self.config_path, &next)?;
+        *config = next;
+        Ok(sanitized)
     }
 
     #[allow(dead_code)]
     pub fn set(&self, config: AppConfig) -> Result<(), String> {
-        {
-            let mut current = self.config.write().unwrap();
-            *current = AppConfig {
-                refresh: config.refresh.sanitize(),
-                log_export: config.log_export.clone().sanitize(),
-                ..config
-            };
-        }
-        self.save()
+        let mut current = self.config.write().unwrap_or_else(|e| e.into_inner());
+        let next = AppConfig {
+            refresh: config.refresh.sanitize(),
+            log_export: config.log_export.clone().sanitize(),
+            ..config
+        };
+        Self::save_to_path(&self.config_path, &next)?;
+        *current = next;
+        Ok(())
     }
-    
+
     /// 保存配置到文件
     pub fn save(&self) -> Result<(), String> {
-        let config = self.config.read().unwrap();
-        let content = serde_json::to_string_pretty(&*config)
+        let config = self.config.read().unwrap_or_else(|e| e.into_inner());
+        Self::save_to_path(&self.config_path, &config)
+    }
+
+    fn save_to_path(config_path: &Path, config: &AppConfig) -> Result<(), String> {
+        let content = serde_json::to_string_pretty(config)
             .map_err(|e| format!("Failed to serialize config: {}", e))?;
-        
+
         // 确保目录存在
-        if let Some(parent) = self.config_path.parent() {
+        if let Some(parent) = config_path.parent() {
             fs::create_dir_all(parent)
                 .map_err(|e| format!("Failed to create config directory: {}", e))?;
         }
-        
-        fs::write(&self.config_path, content)
+
+        fs::write(config_path, content)
             .map_err(|e| format!("Failed to write config file: {}", e))?;
-        
+
         Ok(())
     }
-    
+
     /// 重新加载配置
     #[allow(dead_code)]
     pub fn reload(&self) -> Result<(), String> {
         if !self.config_path.exists() {
             return Err("Config file does not exist".to_string());
         }
-        
+
         let content = fs::read_to_string(&self.config_path)
             .map_err(|e| format!("Failed to read config file: {}", e))?;
-        
+
         let new_config: AppConfig = serde_json::from_str(&content)
             .map_err(|e| format!("Failed to parse config file: {}", e))?;
-        
+
         {
-            let mut config = self.config.write().unwrap();
+            let mut config = self.config.write().unwrap_or_else(|e| e.into_inner());
             *config = AppConfig {
                 refresh: new_config.refresh.sanitize(),
                 log_export: new_config.log_export.clone().sanitize(),
                 ..new_config
             };
         }
-        
+
         Ok(())
     }
 }
@@ -550,7 +569,10 @@ fn remove_ota_command_from_loader(content: &str) -> String {
         .filter(|line| !is_ota_hook_line(line))
         .collect();
 
-    while filtered_lines.last().is_some_and(|line| line.trim().is_empty()) {
+    while filtered_lines
+        .last()
+        .is_some_and(|line| line.trim().is_empty())
+    {
         filtered_lines.pop();
     }
 
@@ -628,8 +650,7 @@ fn set_executable_permissions(path: &Path) -> Result<(), String> {
 pub fn ensure_loader_hooks_init() -> Result<(), String> {
     let loader_path = PathBuf::from(LOADER_SCRIPT_PATH);
     let current_content = if loader_path.exists() {
-        fs::read_to_string(&loader_path)
-            .map_err(|e| format!("Failed to read loader.sh: {}", e))?
+        fs::read_to_string(&loader_path).map_err(|e| format!("Failed to read loader.sh: {}", e))?
     } else {
         String::new()
     };
@@ -709,12 +730,11 @@ pub fn set_init_script(script: String) -> Result<crate::models::InitScriptRespon
 #[cfg(test)]
 mod tests {
     use super::{
-        append_init_command_to_loader,
-        loader_contains_init_command,
-        loader_contains_ota_command,
-        remove_ota_command_from_loader,
-        INIT_SCRIPT_LOADER_COMMAND,
+        append_init_command_to_loader, loader_contains_init_command, loader_contains_ota_command,
+        remove_ota_command_from_loader, ConfigManager, RefreshConfig, INIT_SCRIPT_LOADER_COMMAND,
     };
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn append_init_command_once_for_new_loader() {
@@ -755,5 +775,31 @@ mod tests {
 
         assert!(!loader_contains_ota_command(&updated));
         assert!(updated.contains("/home/root/udx710 -p 80 &"));
+    }
+
+    #[test]
+    fn set_refresh_keeps_memory_unchanged_when_save_fails() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after epoch")
+            .as_nanos();
+        let config_path = std::env::temp_dir().join(format!(
+            "udx710-config-save-fail-{}-{}",
+            std::process::id(),
+            unique
+        ));
+        fs::create_dir_all(&config_path).expect("create directory at config path");
+
+        let manager = ConfigManager::new(config_path.clone());
+        let before = manager.get_refresh().interval_ms;
+
+        let result = manager.set_refresh(RefreshConfig {
+            interval_ms: 12_345,
+        });
+
+        assert!(result.is_err());
+        assert_eq!(manager.get_refresh().interval_ms, before);
+
+        fs::remove_dir_all(config_path).expect("remove test config directory");
     }
 }

@@ -40,6 +40,8 @@ import ErrorSnackbar from '../components/ErrorSnackbar'
 import type { LogExportConfig, LogEntry, LogLevel } from '../api/types'
 import { LOG_LEVEL_OPTIONS } from '../api/types'
 
+type ViewerEntry = LogEntry & { clientKey: string }
+
 // 默认配置（与后端 Default 对齐）
 const DEFAULT_CONFIG: LogExportConfig = {
   remote_enabled: false,
@@ -97,12 +99,30 @@ export default function Logs() {
   const [droppedRemote, setDroppedRemote] = useState(0)
 
   // 实时查看器
-  const [entries, setEntries] = useState<LogEntry[]>([])
+  const [entries, setEntries] = useState<ViewerEntry[]>([])
   const [paused, setPaused] = useState(false)
   const [minLevel, setMinLevel] = useState<LogLevel>('debug')
   const pausedRef = useRef(paused)
   const viewerRef = useRef<HTMLDivElement>(null)
+  const entrySeqRef = useRef(0)
+  const streamErrorShownRef = useRef(false)
   const [autoScroll, setAutoScroll] = useState(true)
+
+  const toViewerEntry = useCallback((entry: LogEntry): ViewerEntry => {
+    const seq = entrySeqRef.current
+    entrySeqRef.current += 1
+    return {
+      ...entry,
+      clientKey: `${entry.ts}-${entry.level}-${entry.target}-${seq}`,
+    }
+  }, [])
+
+  const appendEntry = useCallback((entry: LogEntry) => {
+    setEntries((prev) => {
+      const next = prev.length >= MAX_VIEWER_ENTRIES ? prev.slice(prev.length - MAX_VIEWER_ENTRIES + 1) : prev
+      return [...next, toViewerEntry(entry)]
+    })
+  }, [toViewerEntry])
 
   // 在 effect 中同步 ref（避免 render 期写 ref）
   useEffect(() => {
@@ -137,12 +157,12 @@ export default function Logs() {
       if (!Array.isArray(parsed)) {
         throw new Error('日志快照格式无效')
       }
-      const snapshot = parsed.filter(isLogEntry).slice(-MAX_VIEWER_ENTRIES)
+      const snapshot = parsed.filter(isLogEntry).slice(-MAX_VIEWER_ENTRIES).map(toViewerEntry)
       setEntries(snapshot)
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     }
-  }, [])
+  }, [toViewerEntry])
 
   useEffect(() => {
     void loadConfig()
@@ -171,34 +191,40 @@ export default function Logs() {
       if (pausedRef.current) return
       try {
         const entry = JSON.parse(ev.data) as LogEntry
-        setEntries((prev) => {
-          const next = prev.length >= MAX_VIEWER_ENTRIES ? prev.slice(prev.length - MAX_VIEWER_ENTRIES + 1) : prev
-          return [...next, entry]
-        })
+        streamErrorShownRef.current = false
+        appendEntry(entry)
       } catch {
         // 忽略解析失败
       }
     })
     es.addEventListener('lag', (ev) => {
       if (pausedRef.current) return
-      setEntries((prev) => {
-        const lagEntry: LogEntry = {
-          ts: new Date().toISOString(),
-          level: 'WARN',
-          target: 'viewer',
-          message: `⚠ 实时流积压，部分日志被跳过（${ev.data}）`,
-          fields: '',
-        }
-        return [...prev, lagEntry]
+      appendEntry({
+        ts: new Date().toISOString(),
+        level: 'WARN',
+        target: 'viewer',
+        message: `⚠ 实时流积压，部分日志被跳过（${ev.data}）`,
+        fields: '',
       })
     })
+    es.onopen = () => {
+      streamErrorShownRef.current = false
+    }
     es.onerror = () => {
-      // EventSource 会自动重连，这里不额外提示
+      if (pausedRef.current || streamErrorShownRef.current) return
+      streamErrorShownRef.current = true
+      appendEntry({
+        ts: new Date().toISOString(),
+        level: 'WARN',
+        target: 'viewer',
+        message: '实时日志连接断开，正在重连...',
+        fields: '',
+      })
     }
     return () => {
       es.close()
     }
-  }, [config.viewer_enabled])
+  }, [appendEntry, config.viewer_enabled])
 
   // 自动滚动到底
   useEffect(() => {
@@ -234,6 +260,8 @@ export default function Logs() {
       const res = await api.testLogsRemote()
       if (res.data) {
         setTestMessage({ success: res.data.success, message: res.data.message })
+      } else {
+        setTestMessage({ success: false, message: res.message || '测试上报没有返回结果' })
       }
     } catch (e) {
       setTestMessage({ success: false, message: e instanceof Error ? e.message : String(e) })
@@ -256,13 +284,19 @@ export default function Logs() {
     try {
       const blob = await api.exportLogs(format)
       const url = URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = url
-      a.download = format === 'json' ? 'udx710-logs.json' : 'udx710.log'
-      document.body.appendChild(a)
-      a.click()
-      document.body.removeChild(a)
-      URL.revokeObjectURL(url)
+      try {
+        const a = document.createElement('a')
+        a.href = url
+        a.download = format === 'json' ? 'udx710-logs.json' : 'udx710.log'
+        document.body.appendChild(a)
+        try {
+          a.click()
+        } finally {
+          a.remove()
+        }
+      } finally {
+        URL.revokeObjectURL(url)
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     }
@@ -544,8 +578,8 @@ export default function Logs() {
                       等待日志流…（级别 ≥ {minLevel}）
                     </Typography>
                   ) : (
-                    visibleEntries.map((e, idx) => (
-                      <Box key={idx} sx={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                    visibleEntries.map((e) => (
+                      <Box key={e.clientKey} sx={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
                         <Chip
                           size="small"
                           color={LEVEL_COLOR[e.level] ?? 'default'}

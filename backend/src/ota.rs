@@ -41,15 +41,20 @@ pub fn handle_ota_upload(data: &[u8]) -> Result<OtaUploadResponse, String> {
 
     if is_zip {
         let zip_path = Path::new(OTA_STAGING_DIR).join("update.zip");
-        let mut file = fs::File::create(&zip_path)
-            .map_err(|e| format!("Failed to create zip file: {}", e))?;
+        let mut file =
+            fs::File::create(&zip_path).map_err(|e| format!("Failed to create zip file: {}", e))?;
         file.write_all(data)
             .map_err(|e| format!("Failed to write zip file: {}", e))?;
 
         let output = Command::new("unzip")
             .args(["-o", zip_path.to_str().unwrap_or(""), "-d", OTA_STAGING_DIR])
             .output()
-            .map_err(|e| format!("Failed to extract zip: {}. Make sure 'unzip' is installed.", e))?;
+            .map_err(|e| {
+                format!(
+                    "Failed to extract zip: {}. Make sure 'unzip' is installed.",
+                    e
+                )
+            })?;
 
         if !output.status.success() {
             return Err(format!(
@@ -61,13 +66,18 @@ pub fn handle_ota_upload(data: &[u8]) -> Result<OtaUploadResponse, String> {
         let _ = fs::remove_file(&zip_path);
     } else {
         let tar_path = Path::new(OTA_STAGING_DIR).join("update.tar.gz");
-        let mut file = fs::File::create(&tar_path)
-            .map_err(|e| format!("Failed to create tar file: {}", e))?;
+        let mut file =
+            fs::File::create(&tar_path).map_err(|e| format!("Failed to create tar file: {}", e))?;
         file.write_all(data)
             .map_err(|e| format!("Failed to write tar file: {}", e))?;
 
         let output = Command::new("tar")
-            .args(["-xzf", tar_path.to_str().unwrap_or(""), "-C", OTA_STAGING_DIR])
+            .args([
+                "-xzf",
+                tar_path.to_str().unwrap_or(""),
+                "-C",
+                OTA_STAGING_DIR,
+            ])
             .output()
             .map_err(|e| format!("Failed to extract tar: {}", e))?;
 
@@ -87,8 +97,8 @@ pub fn handle_ota_upload(data: &[u8]) -> Result<OtaUploadResponse, String> {
     let meta_content = fs::read_to_string(&meta_path)
         .map_err(|_| "meta.json not found in OTA package".to_string())?;
 
-    let meta: OtaMeta = serde_json::from_str(&meta_content)
-        .map_err(|e| format!("Invalid meta.json: {}", e))?;
+    let meta: OtaMeta =
+        serde_json::from_str(&meta_content).map_err(|e| format!("Invalid meta.json: {}", e))?;
 
     let validation = validate_ota_package(&meta)?;
 
@@ -208,11 +218,7 @@ fn calculate_directory_md5(path: &Path) -> Result<String, String> {
 }
 
 fn compare_versions(v1: &str, v2: &str) -> bool {
-    let parse = |v: &str| -> Vec<u32> {
-        v.split('.')
-            .filter_map(|s| s.parse().ok())
-            .collect()
-    };
+    let parse = |v: &str| -> Vec<u32> { v.split('.').filter_map(|s| s.parse().ok()).collect() };
 
     let v1_parts = parse(v1);
     let v2_parts = parse(v2);
@@ -230,8 +236,7 @@ fn compare_versions(v1: &str, v2: &str) -> bool {
 }
 
 pub fn apply_ota_update(restart_now: bool) -> Result<String, String> {
-    let meta = read_pending_meta()
-        .ok_or_else(|| "No pending update".to_string())?;
+    let meta = read_pending_meta().ok_or_else(|| "No pending update".to_string())?;
     let validation = validate_ota_package(&meta)?;
     if !validation.valid {
         return Err(validation
@@ -249,13 +254,18 @@ pub fn apply_ota_update(restart_now: bool) -> Result<String, String> {
     // 2) 原子写入新二进制：先写临时文件并 sync，再 rename 覆盖。
     //    避免 fs::copy 中途失败（磁盘满/IO 错/OOM 被杀）留下截断的 ELF → 下次启动 exec 失败变砖。
     let staging_tmp = format!("{}.new", OTA_BINARY_PATH);
-    fs::copy(&staging_binary, &staging_tmp)
-        .map_err(|e| format!("Failed to stage new binary: {}", e))?;
+    let _ = fs::remove_file(&staging_tmp);
+    if let Err(e) = fs::copy(&staging_binary, &staging_tmp) {
+        let _ = fs::remove_file(&staging_tmp);
+        return Err(format!("Failed to stage new binary: {}", e));
+    }
     if let Ok(f) = fs::File::open(&staging_tmp) {
         let _ = f.sync_all();
     }
-    fs::rename(&staging_tmp, OTA_BINARY_PATH)
-        .map_err(|e| format!("Failed to swap new binary into place: {}", e))?;
+    if let Err(e) = fs::rename(&staging_tmp, OTA_BINARY_PATH) {
+        let _ = fs::remove_file(&staging_tmp);
+        return Err(format!("Failed to swap new binary into place: {}", e));
+    }
 
     Command::new("chmod")
         .args(["755", OTA_BINARY_PATH])
@@ -283,15 +293,17 @@ pub fn apply_ota_update(restart_now: bool) -> Result<String, String> {
         });
     }
 
-    Ok(format!("Update to version {} applied successfully", meta.version))
+    Ok(format!(
+        "Update to version {} applied successfully",
+        meta.version
+    ))
 }
 
 fn copy_dir_recursive(src: &str, dst: &str) -> Result<(), String> {
-    fs::create_dir_all(dst)
-        .map_err(|e| format!("Failed to create dir {}: {}", dst, e))?;
+    fs::create_dir_all(dst).map_err(|e| format!("Failed to create dir {}: {}", dst, e))?;
 
-    let entries = fs::read_dir(src)
-        .map_err(|e| format!("Failed to read src dir {}: {}", src, e))?;
+    let entries =
+        fs::read_dir(src).map_err(|e| format!("Failed to read src dir {}: {}", src, e))?;
 
     for entry in entries {
         let entry = entry.map_err(|e| format!("Failed to read entry: {}", e))?;

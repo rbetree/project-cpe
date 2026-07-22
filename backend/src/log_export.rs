@@ -23,7 +23,7 @@ use tracing::field::{Field, Visit};
 use tracing::{Event, Level, Subscriber};
 use tracing_subscriber::layer::{Context, Layer};
 
-use crate::config::{ConfigManager, LogExportConfig};
+use crate::config::{parse_level, ConfigManager, LogExportConfig};
 
 /// 环形缓冲的字节硬顶（条数之外的兜底，保证内存预算）。1 MiB。
 const BYTE_CAP: usize = 1_048_576;
@@ -36,14 +36,7 @@ const ENTRY_OVERHEAD: usize = 96;
 
 /// 级别字符串 → u8（error=1 … trace=5）；无法识别返回 None。
 fn level_str_u8(s: &str) -> Option<u8> {
-    match s.to_ascii_lowercase().as_str() {
-        "error" => Some(1),
-        "warn" => Some(2),
-        "info" => Some(3),
-        "debug" => Some(4),
-        "trace" => Some(5),
-        _ => None,
-    }
+    parse_level(s).map(|level| level_u8(&level))
 }
 
 /// `tracing::Level` → u8（同上序）。
@@ -86,7 +79,10 @@ impl LogEntry {
     /// 文本视图单行：`ts LEVEL target: message  fields`
     pub fn to_text_line(&self) -> String {
         if self.fields.is_empty() {
-            format!("{} {} {}: {}", self.ts, self.level, self.target, self.message)
+            format!(
+                "{} {} {}: {}",
+                self.ts, self.level, self.target, self.message
+            )
         } else {
             format!(
                 "{} {} {}: {}  {}",
@@ -182,7 +178,8 @@ impl LogBuffer {
             }
         }
         self.capture_level.store(level, Ordering::Relaxed);
-        self.cap_entries.store(cfg.buffer_capacity, Ordering::Relaxed);
+        self.cap_entries
+            .store(cfg.buffer_capacity, Ordering::Relaxed);
         self.shipping_enabled.store(
             cfg.remote_enabled && !cfg.remote_url.is_empty(),
             Ordering::Relaxed,
@@ -249,7 +246,12 @@ impl LogBuffer {
 
     /// 快照当前环形缓冲（导出用；按时间正序，最旧在前）。
     pub fn snapshot(&self) -> Vec<Arc<LogEntry>> {
-        self.entries.lock().unwrap_or_else(|e| e.into_inner()).iter().cloned().collect()
+        self.entries
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .cloned()
+            .collect()
     }
 
     /// 清空环形缓冲与统计。
@@ -342,12 +344,12 @@ pub struct LogShipper;
 
 impl LogShipper {
     /// 启动后台 shipper 任务。返回 JoinHandle（主要用于不被取消地 detached 运行）。
-    pub fn spawn(config_manager: Arc<ConfigManager>, buffer: Arc<LogBuffer>) -> tokio::task::JoinHandle<()> {
+    pub fn spawn(
+        config_manager: Arc<ConfigManager>,
+        buffer: Arc<LogBuffer>,
+    ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
-            let client = match Client::builder()
-                .timeout(Duration::from_secs(10))
-                .build()
-            {
+            let client = match Client::builder().timeout(Duration::from_secs(10)).build() {
                 Ok(c) => c,
                 Err(_) => return,
             };
@@ -385,8 +387,9 @@ impl LogShipper {
                         buffer.pushback_outbox(batch);
                         // 指数退避：0.5s,1s,2s,4s,8s,... 上限 30s
                         let backoff = Duration::from_millis(
-                            (500u64).saturating_mul(1u64 << consec_fail.min(7).min(20))
-                        ).min(Duration::from_secs(30));
+                            (500u64).saturating_mul(1u64 << consec_fail.min(7).min(20)),
+                        )
+                        .min(Duration::from_secs(30));
                         tokio::time::sleep(backoff).await;
                     }
                 }
@@ -477,7 +480,12 @@ mod tests {
         }
         let snap = buf.snapshot();
         let total: usize = snap.iter().map(|e| e.approx_bytes()).sum();
-        assert!(total <= BYTE_CAP + 256, "字节总量不应超过硬顶 {}，实际 {}", BYTE_CAP, total);
+        assert!(
+            total <= BYTE_CAP + 256,
+            "字节总量不应超过硬顶 {}，实际 {}",
+            BYTE_CAP,
+            total
+        );
     }
 
     #[test]
@@ -496,7 +504,9 @@ mod tests {
         buf.push(entry("ERROR", "keep"));
         let snap = buf.snapshot();
         assert_eq!(snap.len(), 2, "应只保留 WARN/ERROR");
-        assert!(snap.iter().all(|e| matches!(e.level.as_str(), "WARN" | "ERROR")));
+        assert!(snap
+            .iter()
+            .all(|e| matches!(e.level.as_str(), "WARN" | "ERROR")));
     }
 
     #[test]

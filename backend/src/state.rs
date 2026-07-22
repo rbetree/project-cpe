@@ -33,13 +33,13 @@ impl FrontendRuntime {
     }
 
     pub fn mark_seen(&self) {
-        *self.last_seen.write().unwrap() = Some(Instant::now());
+        *self.last_seen.write().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
     }
 
     pub fn is_recent(&self, timeout: Duration) -> bool {
         self.last_seen
             .read()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .is_some_and(|last_seen| last_seen.elapsed() <= timeout)
     }
 }
