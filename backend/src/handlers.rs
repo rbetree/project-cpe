@@ -21,7 +21,7 @@ use axum::{
 use futures_util::stream;
 use serde_json::json;
 use std::sync::{Arc, OnceLock};
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 use zbus::Connection;
 
 use crate::state::FrontendRuntime;
@@ -49,6 +49,7 @@ use crate::{
 use std::process::Command;
 
 /// 处理 OPTIONS 请求（CORS 预检）
+#[tracing::instrument(skip_all)]
 pub async fn options_handler() -> impl IntoResponse {
     StatusCode::NO_CONTENT
 }
@@ -61,13 +62,17 @@ pub async fn options_handler() -> impl IntoResponse {
 ///   "cmd": "AT+CGSN"
 /// }
 /// ```
+#[tracing::instrument(skip_all)]
 pub async fn post_at_command(
     State(conn): State<Arc<Connection>>,
     Json(payload): Json<AtCommandRequest>,
 ) -> impl IntoResponse {
     let (status, body_text) = match send_at_command(&conn, &payload.cmd).await {
         Ok(result) => (StatusCode::OK, result),
-        Err(e) => (StatusCode::OK, format!("Error: {}", e)),
+        Err(e) => {
+            error!(cmd = %payload.cmd, %e, "AT 命令发送失败");
+            (StatusCode::OK, format!("Error: {}", e))
+        }
     };
 
     let mut headers = HeaderMap::new();
@@ -140,6 +145,7 @@ async fn fetch_neighbor_cells(
 ///   }
 /// }
 /// ```
+#[tracing::instrument(skip_all)]
 pub async fn get_cells(State(conn): State<Arc<Connection>>) -> impl IntoResponse {
     let result = async {
         // 1. 获取服务小区信息（包含网络制式）
@@ -198,6 +204,7 @@ pub async fn get_cells(State(conn): State<Arc<Connection>>) -> impl IntoResponse
 ///   }
 /// }
 /// ```
+#[tracing::instrument(skip_all)]
 pub async fn get_device_info(State(conn): State<Arc<Connection>>) -> impl IntoResponse {
     match get_device_info_data(&conn).await {
         Ok(data) => (
@@ -234,6 +241,7 @@ pub async fn get_device_info(State(conn): State<Arc<Connection>>) -> impl IntoRe
 /// # 说明
 /// 每次切换数据连接状态时，会自动清空 iptables 规则（flush），
 /// 以确保网络配置处于干净状态
+#[tracing::instrument(skip_all)]
 pub async fn set_data_status(
     State(conn): State<Arc<Connection>>,
     Json(payload): Json<DataConnectionRequest>,
@@ -245,22 +253,28 @@ pub async fn set_data_status(
 
     // 2. 设置数据连接状态
     match set_data_connection(&conn, payload.active).await {
-        Ok(_) => (
-            StatusCode::OK,
-            Json(ApiResponse::success_with_message(
-                "Data connection updated successfully",
-                DataConnectionResponse {
-                    active: payload.active,
-                },
-            )),
-        ),
-        Err(e) => (
-            StatusCode::OK,
-            Json(ApiResponse::<DataConnectionResponse>::error(format!(
-                "Failed to set data connection: {}",
-                e
-            ))),
-        ),
+        Ok(_) => {
+            info!(active = payload.active, "数据连接状态已设置");
+            (
+                StatusCode::OK,
+                Json(ApiResponse::success_with_message(
+                    "Data connection updated successfully",
+                    DataConnectionResponse {
+                        active: payload.active,
+                    },
+                )),
+            )
+        }
+        Err(e) => {
+            error!(active = payload.active, %e, "设置数据连接状态失败");
+            (
+                StatusCode::OK,
+                Json(ApiResponse::<DataConnectionResponse>::error(format!(
+                    "Failed to set data connection: {}",
+                    e
+                ))),
+            )
+        }
     }
 }
 
@@ -276,6 +290,7 @@ pub async fn set_data_status(
 ///   }
 /// }
 /// ```
+#[tracing::instrument(skip_all)]
 pub async fn get_data_status(State(conn): State<Arc<Connection>>) -> impl IntoResponse {
     match get_data_connection_status(&conn).await {
         Ok(active) => (
@@ -308,6 +323,7 @@ pub async fn get_data_status(State(conn): State<Arc<Connection>>) -> impl IntoRe
 ///   }
 /// }
 /// ```
+#[tracing::instrument(skip_all)]
 pub async fn get_roaming_status_handler(State(conn): State<Arc<Connection>>) -> impl IntoResponse {
     match get_roaming_status(&conn).await {
         Ok((roaming_allowed, is_roaming)) => (
@@ -350,6 +366,7 @@ pub async fn get_roaming_status_handler(State(conn): State<Arc<Connection>>) -> 
 ///   }
 /// }
 /// ```
+#[tracing::instrument(skip_all)]
 pub async fn set_roaming_status_handler(
     State(conn): State<Arc<Connection>>,
     Json(payload): Json<RoamingRequest>,
@@ -375,22 +392,28 @@ pub async fn set_roaming_status_handler(
                         )),
                     )
                 }
-                Err(e) => (
-                    StatusCode::OK,
-                    Json(ApiResponse::<RoamingResponse>::error(format!(
-                        "Roaming setting updated, but failed to read status: {}",
-                        e
-                    ))),
-                ),
+                Err(e) => {
+                    warn!(%e, "漫游设置已更新但读取状态失败");
+                    (
+                        StatusCode::OK,
+                        Json(ApiResponse::<RoamingResponse>::error(format!(
+                            "Roaming setting updated, but failed to read status: {}",
+                            e
+                        ))),
+                    )
+                }
             }
         }
-        Err(e) => (
-            StatusCode::OK,
-            Json(ApiResponse::<RoamingResponse>::error(format!(
-                "Failed to set roaming: {}",
-                e
-            ))),
-        ),
+        Err(e) => {
+            error!(allowed = payload.allowed, %e, "设置漫游失败");
+            (
+                StatusCode::OK,
+                Json(ApiResponse::<RoamingResponse>::error(format!(
+                    "Failed to set roaming: {}",
+                    e
+                ))),
+            )
+        }
     }
 }
 
@@ -415,6 +438,7 @@ pub async fn set_roaming_status_handler(
 ///   }
 /// }
 /// ```
+#[tracing::instrument(skip_all)]
 pub async fn set_airplane_mode_handler(
     State(conn): State<Arc<Connection>>,
     Json(payload): Json<AirplaneModeRequest>,
@@ -434,22 +458,28 @@ pub async fn set_airplane_mode_handler(
                         Json(ApiResponse::success_with_message(msg, status)),
                     )
                 }
-                Err(e) => (
-                    StatusCode::OK,
-                    Json(ApiResponse::<AirplaneModeResponse>::error(format!(
-                        "Airplane mode set but failed to read status: {}",
-                        e
-                    ))),
-                ),
+                Err(e) => {
+                    warn!(%e, "飞行模式已设置但读取状态失败");
+                    (
+                        StatusCode::OK,
+                        Json(ApiResponse::<AirplaneModeResponse>::error(format!(
+                            "Airplane mode set but failed to read status: {}",
+                            e
+                        ))),
+                    )
+                }
             }
         }
-        Err(e) => (
-            StatusCode::OK,
-            Json(ApiResponse::<AirplaneModeResponse>::error(format!(
-                "Failed to set airplane mode: {}",
-                e
-            ))),
-        ),
+        Err(e) => {
+            error!(enabled = payload.enabled, %e, "设置飞行模式失败");
+            (
+                StatusCode::OK,
+                Json(ApiResponse::<AirplaneModeResponse>::error(format!(
+                    "Failed to set airplane mode: {}",
+                    e
+                ))),
+            )
+        }
     }
 }
 
@@ -467,6 +497,7 @@ pub async fn set_airplane_mode_handler(
 ///   }
 /// }
 /// ```
+#[tracing::instrument(skip_all)]
 pub async fn get_airplane_mode_handler(State(conn): State<Arc<Connection>>) -> impl IntoResponse {
     match get_airplane_mode(&conn).await {
         Ok(status) => (
@@ -492,6 +523,7 @@ pub async fn get_airplane_mode_handler(State(conn): State<Arc<Connection>>) -> i
 ///   "message": "Service is running"
 /// }
 /// ```
+#[tracing::instrument(skip_all)]
 pub async fn health_check() -> impl IntoResponse {
     (
         StatusCode::OK,
@@ -518,6 +550,7 @@ pub async fn health_check() -> impl IntoResponse {
 ///   }
 /// }
 /// ```
+#[tracing::instrument(skip_all)]
 pub async fn get_sim_info(State(conn): State<Arc<Connection>>) -> impl IntoResponse {
     match get_sim_info_data(&conn).await {
         Ok(data) => (
@@ -549,6 +582,7 @@ pub async fn get_sim_info(State(conn): State<Arc<Connection>>) -> impl IntoRespo
 ///   }
 /// }
 /// ```
+#[tracing::instrument(skip_all)]
 pub async fn get_network_info(State(conn): State<Arc<Connection>>) -> impl IntoResponse {
     match get_network_info_data(&conn).await {
         Ok(data) => (
@@ -579,6 +613,7 @@ pub async fn get_network_info(State(conn): State<Arc<Connection>>) -> impl IntoR
 ///   }
 /// }
 /// ```
+#[tracing::instrument(skip_all)]
 pub async fn get_qos_info(State(conn): State<Arc<Connection>>) -> impl IntoResponse {
     match get_qos_info_data(&conn).await {
         Ok(data) => (
@@ -663,6 +698,7 @@ fn get_mode_name(mode: Option<u8>) -> String {
 ///   }
 /// }
 /// ```
+#[tracing::instrument(skip_all)]
 pub async fn get_usb_mode() -> impl IntoResponse {
     // 读取 USB 模式配置（包括硬件状态和配置文件）
     match usb_switch::get_usb_mode_config() {
@@ -712,6 +748,7 @@ pub async fn get_usb_mode() -> impl IntoResponse {
 ///   "message": "USB mode configuration saved. Please reboot to apply changes."
 /// }
 /// ```
+#[tracing::instrument(skip_all)]
 pub async fn set_usb_mode(Json(payload): Json<SetUsbModeRequest>) -> impl IntoResponse {
     // 验证模式值
     if !(1..=3).contains(&payload.mode) {
@@ -732,6 +769,7 @@ pub async fn set_usb_mode(Json(payload): Json<SetUsbModeRequest>) -> impl IntoRe
             } else {
                 "临时"
             };
+            info!(mode = payload.mode, permanent = payload.permanent, "USB 模式配置已保存");
             (
                 StatusCode::OK,
                 Json(ApiResponse::success_with_message(
@@ -743,13 +781,16 @@ pub async fn set_usb_mode(Json(payload): Json<SetUsbModeRequest>) -> impl IntoRe
                 )),
             )
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiResponse::<()>::error(format!(
-                "Failed to set USB mode: {}",
-                e
-            ))),
-        ),
+        Err(e) => {
+            error!(mode = payload.mode, %e, "USB 模式配置失败");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::<()>::error(format!(
+                    "Failed to set USB mode: {}",
+                    e
+                ))),
+            )
+        }
     }
 }
 
@@ -774,6 +815,7 @@ pub async fn set_usb_mode(Json(payload): Json<SetUsbModeRequest>) -> impl IntoRe
 /// - macOS 可能需要更长时间识别新设备
 /// - 模式 3 (RNDIS) 在 macOS/Linux 上可能需要额外驱动
 /// - 建议使用模式 1 (NCM) 以获得最佳跨平台兼容性
+#[tracing::instrument(skip_all)]
 pub async fn set_usb_mode_advanced(Json(payload): Json<SetUsbModeRequest>) -> impl IntoResponse {
     // 验证模式值
     if !(1..=3).contains(&payload.mode) {
@@ -789,6 +831,7 @@ pub async fn set_usb_mode_advanced(Json(payload): Json<SetUsbModeRequest>) -> im
     match usb_switch::switch_usb_mode_advanced(payload.mode) {
         Ok(_) => {
             let mode_name = get_mode_name(Some(payload.mode));
+            info!(mode = payload.mode, "USB 模式热切换成功");
             (
                 StatusCode::OK,
                 Json(ApiResponse::success_with_message(
@@ -797,10 +840,13 @@ pub async fn set_usb_mode_advanced(Json(payload): Json<SetUsbModeRequest>) -> im
                 )),
             )
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiResponse::<()>::error(format!("USB 模式切换失败: {}", e))),
-        ),
+        Err(e) => {
+            error!(mode = payload.mode, %e, "USB 模式热切换失败");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::<()>::error(format!("USB 模式切换失败: {}", e))),
+            )
+        }
     }
 }
 
@@ -831,6 +877,7 @@ pub async fn set_usb_mode_advanced(Json(payload): Json<SetUsbModeRequest>) -> im
 ///   }
 /// }
 /// ```
+#[tracing::instrument(skip_all)]
 pub async fn get_cpu_info() -> impl IntoResponse {
     match read_cpu_info() {
         Ok(data) => (
@@ -857,6 +904,7 @@ pub async fn get_cpu_info() -> impl IntoResponse {
 ///   }
 /// }
 /// ```
+#[tracing::instrument(skip_all)]
 pub async fn get_system_stats() -> impl IntoResponse {
     use std::time::{Duration, Instant};
     use tokio::time::sleep;
@@ -983,6 +1031,7 @@ pub async fn get_system_stats() -> impl IntoResponse {
 /// GET /api/location/cell-info - 获取基站定位参数
 ///
 /// 返回格式化的基站定位参数，可用于调用第三方定位API（如Google Geolocation、OpenCellID等）
+#[tracing::instrument(skip_all)]
 pub async fn get_cell_location_info(State(conn): State<Arc<Connection>>) -> impl IntoResponse {
     // 获取网络信息（MCC、MNC）
     let network_info = match get_network_info_data(&conn).await {
@@ -1200,6 +1249,7 @@ pub async fn get_cell_location_info(State(conn): State<Arc<Connection>>) -> impl
 /// - IPv4和IPv6地址列表
 /// - 公网/内网地址分类
 /// - 流量统计（接收/发送字节数、包数、错误数）
+#[tracing::instrument(skip_all)]
 pub async fn get_network_interfaces_info() -> impl IntoResponse {
     let result = tokio::task::spawn_blocking(|| {
         let interfaces = read_network_interfaces()?;
@@ -1244,6 +1294,7 @@ pub async fn get_network_interfaces_info() -> impl IntoResponse {
 ///   }
 /// }
 /// ```
+#[tracing::instrument(skip_all)]
 pub async fn get_radio_mode_handler(State(conn): State<Arc<Connection>>) -> impl IntoResponse {
     match get_radio_mode(&conn).await {
         Ok(data) => (
@@ -1273,6 +1324,7 @@ pub async fn get_radio_mode_handler(State(conn): State<Arc<Connection>>) -> impl
 /// - auto: 4G/5G 自动切换
 /// - lte: 仅 4G LTE
 /// - nr: 仅 5G NR
+#[tracing::instrument(skip_all)]
 pub async fn set_radio_mode_handler(
     State(conn): State<Arc<Connection>>,
     Json(payload): Json<RadioModeRequest>,
@@ -1284,6 +1336,7 @@ pub async fn set_radio_mode_handler(
                 RadioMode::LteOnly => "4G LTE Only",
                 RadioMode::NrOnly => "5G NR Only",
             };
+            info!(mode = %mode_str, "无线模式设置成功");
             (
                 StatusCode::OK,
                 Json(ApiResponse::success_with_message(
@@ -1292,13 +1345,16 @@ pub async fn set_radio_mode_handler(
                 )),
             )
         }
-        Err(e) => (
-            StatusCode::OK,
-            Json(ApiResponse::<serde_json::Value>::error(format!(
-                "Failed to set radio mode: {}",
-                e
-            ))),
-        ),
+        Err(e) => {
+            error!(%e, "无线模式设置失败");
+            (
+                StatusCode::OK,
+                Json(ApiResponse::<serde_json::Value>::error(format!(
+                    "Failed to set radio mode: {}",
+                    e
+                ))),
+            )
+        },
     }
 }
 
@@ -1318,6 +1374,7 @@ pub async fn set_radio_mode_handler(
 ///   }
 /// }
 /// ```
+#[tracing::instrument(skip_all)]
 pub async fn get_band_lock_handler(State(conn): State<Arc<Connection>>) -> impl IntoResponse {
     // 读取 LTE 频段锁定状态
     let lte_result = send_at_command(&conn, "AT+SPLBAND=0").await;
@@ -1414,8 +1471,11 @@ pub async fn get_band_lock_handler(State(conn): State<Arc<Connection>>) -> impl 
 ///   "message": "System will reboot in 3 seconds"
 /// }
 /// ```
+#[tracing::instrument(skip_all)]
 pub async fn system_reboot(Json(payload): Json<Option<SystemRebootRequest>>) -> impl IntoResponse {
     let delay = payload.map(|p| p.delay_seconds).unwrap_or(3);
+
+    info!(delay, "系统复位请求已收到");
 
     // 使用 tokio 异步执行重启命令
     tokio::spawn(async move {
@@ -1452,6 +1512,7 @@ pub async fn system_reboot(Json(payload): Json<Option<SystemRebootRequest>>) -> 
 /// - 所有数组都为空时，表示解除所有频段锁定
 /// - LTE FDD: B1-B16, TDD: B33-B48
 /// - NR FDD: N1-N16, TDD: N41-N56 (实际支持 N41-N79)
+#[tracing::instrument(skip_all)]
 pub async fn set_band_lock_handler(
     State(conn): State<Arc<Connection>>,
     Json(payload): Json<BandLockRequest>,
@@ -1705,6 +1766,7 @@ fn parse_spforcefrq_query_response(response: &str, rat: u8) -> CellLockRatStatus
 ///   }
 /// }
 /// ```
+#[tracing::instrument(skip_all)]
 pub async fn get_cell_lock_handler(State(conn): State<Arc<Connection>>) -> impl IntoResponse {
     let mut rat_status = Vec::new();
     let mut any_locked = false;
@@ -1778,6 +1840,7 @@ pub async fn get_cell_lock_handler(State(conn): State<Arc<Connection>>) -> impl 
 ///   "arfcn": 633984
 /// }
 /// ```
+#[tracing::instrument(skip_all)]
 pub async fn set_cell_lock_handler(
     State(conn): State<Arc<Connection>>,
     Json(payload): Json<CellLockRequest>,
@@ -1817,6 +1880,7 @@ pub async fn set_cell_lock_handler(
 
         for (cmd, desc) in &steps {
             if let Err(e) = send_at_command(&conn, cmd).await {
+                error!(%e, step = %desc, "锁定流程步骤失败");
                 // 恢复正常模式
                 let _ = send_at_command(&conn, "AT+SFUN=4").await;
                 return (
@@ -1832,6 +1896,7 @@ pub async fn set_cell_lock_handler(
         // 设置锁定
         let lock_cmd = format!("AT+SPFORCEFRQ={},2,{},{}", forcefrq_type, arfcn, pci);
         if let Err(e) = send_at_command(&conn, &lock_cmd).await {
+            error!(%e, "设置小区锁定失败");
             // 恢复正常模式
             let _ = send_at_command(&conn, "AT+SFUN=4").await;
             return (
@@ -1845,6 +1910,7 @@ pub async fn set_cell_lock_handler(
 
         // 恢复正常模式
         if let Err(e) = send_at_command(&conn, "AT+SFUN=4").await {
+            error!(%e, "锁定流程恢复正常模式失败");
             return (
                 StatusCode::OK,
                 Json(ApiResponse::<serde_json::Value>::error(format!(
@@ -1854,6 +1920,7 @@ pub async fn set_cell_lock_handler(
             );
         }
 
+        info!(arfcn = arfcn, pci = pci, "小区锁定已设置");
         (
             StatusCode::OK,
             Json(ApiResponse::success_with_message(
@@ -1875,6 +1942,7 @@ pub async fn set_cell_lock_handler(
         // 解锁：清空指定类型的锁定
         // 1. 进入工程模式
         if let Err(e) = send_at_command(&conn, "AT+SFUN=5").await {
+            error!(%e, "解锁流程进入工程模式失败");
             return (
                 StatusCode::OK,
                 Json(ApiResponse::<serde_json::Value>::error(format!(
@@ -1887,6 +1955,7 @@ pub async fn set_cell_lock_handler(
         // 2. 清空锁定
         let clear_cmd = format!("AT+SPFORCEFRQ={},0", forcefrq_type);
         if let Err(e) = send_at_command(&conn, &clear_cmd).await {
+            error!(%e, "清空小区锁定失败");
             // 恢复正常模式
             let _ = send_at_command(&conn, "AT+SFUN=4").await;
             return (
@@ -1900,6 +1969,7 @@ pub async fn set_cell_lock_handler(
 
         // 3. 恢复正常模式
         if let Err(e) = send_at_command(&conn, "AT+SFUN=4").await {
+            error!(%e, "解锁流程恢复正常模式失败");
             return (
                 StatusCode::OK,
                 Json(ApiResponse::<serde_json::Value>::error(format!(
@@ -1909,6 +1979,7 @@ pub async fn set_cell_lock_handler(
             );
         }
 
+        info!("小区锁定已解除");
         (
             StatusCode::OK,
             Json(ApiResponse::success_with_message(
@@ -1925,6 +1996,7 @@ pub async fn set_cell_lock_handler(
 /// POST /api/cell-lock/unlock-all - 解除所有小区锁定
 ///
 /// 清除 NR 和 LTE 的小区锁定
+#[tracing::instrument(skip_all)]
 pub async fn unlock_all_cells_handler(
     State(conn): State<Arc<Connection>>,
     Json(_payload): Json<CellUnlockRequest>,
@@ -1955,6 +2027,7 @@ pub async fn unlock_all_cells_handler(
     }
 
     if errors.is_empty() {
+        info!("所有小区锁定已解除");
         (
             StatusCode::OK,
             Json(ApiResponse::success_with_message(
@@ -1966,6 +2039,7 @@ pub async fn unlock_all_cells_handler(
             )),
         )
     } else {
+        error!(errors = %errors.join("; "), "解锁所有小区失败");
         (
             StatusCode::OK,
             Json(ApiResponse::<serde_json::Value>::error(format!(
@@ -1981,6 +2055,7 @@ pub async fn unlock_all_cells_handler(
 use crate::db::Database;
 
 /// GET /api/calls - 获取当前通话列表
+#[tracing::instrument(skip_all)]
 pub async fn get_calls_handler(
     State(conn): State<Arc<Connection>>,
 ) -> (StatusCode, Json<ApiResponse<CallListResponse>>) {
@@ -2001,84 +2076,113 @@ pub async fn get_calls_handler(
 }
 
 /// POST /api/call/dial - 拨打电话
+#[tracing::instrument(skip_all)]
 pub async fn dial_call_handler(
     State(conn): State<Arc<Connection>>,
     Json(req): Json<MakeCallRequest>,
 ) -> (StatusCode, Json<ApiResponse<CallInfo>>) {
     match crate::dbus::dial_call(&conn, &req.phone_number).await {
-        Ok(call_info) => (
-            StatusCode::OK,
-            Json(ApiResponse::success_with_message(
-                "Call initiated",
-                call_info,
-            )),
-        ),
-        Err(e) => (
-            StatusCode::OK,
-            Json(ApiResponse::error(format!("Failed to dial: {}", e))),
-        ),
+        Ok(call_info) => {
+            info!(number = %req.phone_number, "拨号成功");
+            (
+                StatusCode::OK,
+                Json(ApiResponse::success_with_message(
+                    "Call initiated",
+                    call_info,
+                )),
+            )
+        }
+        Err(e) => {
+            error!(number = %req.phone_number, %e, "拨号失败");
+            (
+                StatusCode::OK,
+                Json(ApiResponse::error(format!("Failed to dial: {}", e))),
+            )
+        }
     }
 }
 
 /// POST /api/call/hangup - 挂断电话
+#[tracing::instrument(skip_all)]
 pub async fn hangup_call_handler(
     State(conn): State<Arc<Connection>>,
     Json(req): Json<HangupCallRequest>,
 ) -> (StatusCode, Json<ApiResponse<serde_json::Value>>) {
     match crate::dbus::hangup_call(&conn, &req.path).await {
-        Ok(_) => (
-            StatusCode::OK,
-            Json(ApiResponse::success_with_message("Call ended", json!({}))),
-        ),
-        Err(e) => (
-            StatusCode::OK,
-            Json(ApiResponse::error(format!("Failed to hangup: {}", e))),
-        ),
+        Ok(_) => {
+            info!("通话已挂断");
+            (
+                StatusCode::OK,
+                Json(ApiResponse::success_with_message("Call ended", json!({}))),
+            )
+        }
+        Err(e) => {
+            error!(%e, "挂断通话失败");
+            (
+                StatusCode::OK,
+                Json(ApiResponse::error(format!("Failed to hangup: {}", e))),
+            )
+        }
     }
 }
 
 /// POST /api/call/hangup-all - 挂断所有电话
+#[tracing::instrument(skip_all)]
 pub async fn hangup_all_calls_handler(
     State(conn): State<Arc<Connection>>,
 ) -> (StatusCode, Json<ApiResponse<serde_json::Value>>) {
     match crate::dbus::hangup_all_calls(&conn).await {
-        Ok(count) => (
-            StatusCode::OK,
-            Json(ApiResponse::success_with_message(
-                format!("Ended {} call(s)", count),
-                json!({ "count": count }),
-            )),
-        ),
-        Err(e) => (
-            StatusCode::OK,
-            Json(ApiResponse::error(format!("Failed to hangup all: {}", e))),
-        ),
+        Ok(count) => {
+            info!(count, "已挂断所有通话");
+            (
+                StatusCode::OK,
+                Json(ApiResponse::success_with_message(
+                    format!("Ended {} call(s)", count),
+                    json!({ "count": count }),
+                )),
+            )
+        }
+        Err(e) => {
+            error!(%e, "挂断所有通话失败");
+            (
+                StatusCode::OK,
+                Json(ApiResponse::error(format!("Failed to hangup all: {}", e))),
+            )
+        }
     }
 }
 
 /// POST /api/call/answer - 接听来电
+#[tracing::instrument(skip_all)]
 pub async fn answer_call_handler(
     State(conn): State<Arc<Connection>>,
     Json(req): Json<HangupCallRequest>, // 复用结构，只需要 path
 ) -> (StatusCode, Json<ApiResponse<serde_json::Value>>) {
     match crate::dbus::answer_call(&conn, &req.path).await {
-        Ok(_) => (
-            StatusCode::OK,
-            Json(ApiResponse::success_with_message(
-                "Call answered",
-                json!({}),
-            )),
-        ),
-        Err(e) => (
-            StatusCode::OK,
-            Json(ApiResponse::error(format!("Failed to answer: {}", e))),
-        ),
+        Ok(_) => {
+            info!("已接听来电");
+            (
+                StatusCode::OK,
+                Json(ApiResponse::success_with_message(
+                    "Call answered",
+                    json!({}),
+                )),
+            )
+        }
+        Err(e) => {
+            error!(%e, "接听来电失败");
+            (
+                StatusCode::OK,
+                Json(ApiResponse::error(format!("Failed to answer: {}", e))),
+            )
+        }
     }
 }
 
 // ============ 短信相关 API ============
 
 /// POST /api/sms/send - 发送短信
+#[tracing::instrument(skip_all)]
 pub async fn send_sms_handler(
     State((conn, db)): State<(Arc<Connection>, Arc<Database>)>,
     Json(req): Json<SendSmsRequest>,
@@ -2088,33 +2192,43 @@ pub async fn send_sms_handler(
         Ok(message_path) => {
             // 存储到数据库
             match db.insert_sms("outgoing", &req.phone_number, &req.content, "sent", None) {
-                Ok(id) => (
-                    StatusCode::OK,
-                    Json(ApiResponse::success_with_message(
-                        "SMS sent successfully",
-                        json!({
-                            "message_path": message_path,
-                            "db_id": id,
-                        }),
-                    )),
-                ),
-                Err(_e) => (
-                    StatusCode::OK,
-                    Json(ApiResponse::success_with_message(
-                        "SMS sent but failed to save to database",
-                        json!({ "message_path": message_path }),
-                    )),
-                ),
+                Ok(id) => {
+                    info!(number = %req.phone_number, "短信发送成功");
+                    (
+                        StatusCode::OK,
+                        Json(ApiResponse::success_with_message(
+                            "SMS sent successfully",
+                            json!({
+                                "message_path": message_path,
+                                "db_id": id,
+                            }),
+                        )),
+                    )
+                }
+                Err(_e) => {
+                    warn!(number = %req.phone_number, %_e, "短信发送成功但存储到数据库失败");
+                    (
+                        StatusCode::OK,
+                        Json(ApiResponse::success_with_message(
+                            "SMS sent but failed to save to database",
+                            json!({ "message_path": message_path }),
+                        )),
+                    )
+                }
             }
         }
-        Err(e) => (
-            StatusCode::OK,
-            Json(ApiResponse::error(format!("Failed to send SMS: {}", e))),
-        ),
+        Err(e) => {
+            error!(number = %req.phone_number, %e, "短信发送失败");
+            (
+                StatusCode::OK,
+                Json(ApiResponse::error(format!("Failed to send SMS: {}", e))),
+            )
+        }
     }
 }
 
 /// GET /api/sms/list - 获取短信列表
+#[tracing::instrument(skip_all)]
 pub async fn get_sms_list_handler(
     State(db): State<Arc<Database>>,
     axum::extract::Query(req): axum::extract::Query<SmsListRequest>,
@@ -2135,6 +2249,7 @@ pub async fn get_sms_list_handler(
 }
 
 /// GET /api/sms/conversation - 获取与特定号码的对话历史
+#[tracing::instrument(skip_all)]
 pub async fn get_sms_conversation_handler(
     State(db): State<Arc<Database>>,
     axum::extract::Query(req): axum::extract::Query<SmsConversationRequest>,
@@ -2158,6 +2273,7 @@ pub async fn get_sms_conversation_handler(
 }
 
 /// GET /api/sms/stats - 获取短信统计
+#[tracing::instrument(skip_all)]
 pub async fn get_sms_stats_handler(
     State(db): State<Arc<Database>>,
 ) -> (StatusCode, Json<ApiResponse<crate::db::SmsStats>>) {
@@ -2184,6 +2300,7 @@ impl Default for crate::db::SmsStats {
 }
 
 /// DELETE /api/sms/clear - 清空所有短信
+#[tracing::instrument(skip_all)]
 pub async fn clear_sms_handler(
     State(db): State<Arc<Database>>,
 ) -> (StatusCode, Json<ApiResponse<serde_json::Value>>) {
@@ -2195,19 +2312,23 @@ pub async fn clear_sms_handler(
                 json!({}),
             )),
         ),
-        Err(e) => (
-            StatusCode::OK,
-            Json(ApiResponse::error(format!(
-                "Failed to clear messages: {}",
-                e
-            ))),
-        ),
+        Err(e) => {
+            error!(%e, "清除短信失败");
+            (
+                StatusCode::OK,
+                Json(ApiResponse::error(format!(
+                    "Failed to clear messages: {}",
+                    e
+                ))),
+            )
+        },
     }
 }
 
 // ============ 新增功能 API ============
 
 /// GET /api/device/imeisv - 获取 IMEISV（软件版本号）
+#[tracing::instrument(skip_all)]
 pub async fn get_imeisv_handler(
     State(conn): State<Arc<Connection>>,
 ) -> (StatusCode, Json<ApiResponse<crate::models::ImeisvResponse>>) {
@@ -2224,6 +2345,7 @@ pub async fn get_imeisv_handler(
 }
 
 /// GET /api/network/signal-strength - 获取信号强度详细信息
+#[tracing::instrument(skip_all)]
 pub async fn get_signal_strength_handler(
     State(conn): State<Arc<Connection>>,
 ) -> (
@@ -2246,6 +2368,7 @@ pub async fn get_signal_strength_handler(
 }
 
 /// GET /api/network/nitz - 获取 NITZ 网络时间
+#[tracing::instrument(skip_all)]
 pub async fn get_nitz_handler(
     State(conn): State<Arc<Connection>>,
 ) -> (
@@ -2268,6 +2391,7 @@ pub async fn get_nitz_handler(
 }
 
 /// GET /api/ims/status - 获取 IMS 状态
+#[tracing::instrument(skip_all)]
 pub async fn get_ims_status_handler(
     State(conn): State<Arc<Connection>>,
 ) -> (
@@ -2290,6 +2414,7 @@ pub async fn get_ims_status_handler(
 }
 
 /// GET /api/call/volume - 获取通话音量
+#[tracing::instrument(skip_all)]
 pub async fn get_call_volume_handler(
     State(conn): State<Arc<Connection>>,
 ) -> (
@@ -2312,6 +2437,7 @@ pub async fn get_call_volume_handler(
 }
 
 /// POST /api/call/volume - 设置通话音量
+#[tracing::instrument(skip_all)]
 pub async fn set_call_volume_handler(
     State(conn): State<Arc<Connection>>,
     Json(req): Json<crate::models::SetCallVolumeRequest>,
@@ -2326,17 +2452,21 @@ pub async fn set_call_volume_handler(
                 json!({}),
             )),
         ),
-        Err(e) => (
-            StatusCode::OK,
-            Json(ApiResponse::error(format!(
-                "Failed to set call volume: {}",
-                e
-            ))),
-        ),
+        Err(e) => {
+            error!(%e, "通话音量设置失败");
+            (
+                StatusCode::OK,
+                Json(ApiResponse::error(format!(
+                    "Failed to set call volume: {}",
+                    e
+                ))),
+            )
+        },
     }
 }
 
 /// GET /api/voicemail/status - 获取语音留言状态
+#[tracing::instrument(skip_all)]
 pub async fn get_voicemail_status_handler(
     State(conn): State<Arc<Connection>>,
 ) -> (
@@ -2359,6 +2489,7 @@ pub async fn get_voicemail_status_handler(
 }
 
 /// GET /api/network/operators - 获取运营商列表（快速）
+#[tracing::instrument(skip_all)]
 pub async fn get_operators_handler(
     State(conn): State<Arc<Connection>>,
 ) -> (
@@ -2381,6 +2512,7 @@ pub async fn get_operators_handler(
 }
 
 /// GET /api/network/operators/scan - 扫描所有运营商（慢，120秒）
+#[tracing::instrument(skip_all)]
 pub async fn scan_operators_handler(
     State(conn): State<Arc<Connection>>,
 ) -> (
@@ -2395,17 +2527,21 @@ pub async fn scan_operators_handler(
                 operators,
             )),
         ),
-        Err(e) => (
-            StatusCode::OK,
-            Json(ApiResponse::error(format!(
-                "Failed to scan operators: {}",
-                e
-            ))),
-        ),
+        Err(e) => {
+            error!(%e, "扫描运营商失败");
+            (
+                StatusCode::OK,
+                Json(ApiResponse::error(format!(
+                    "Failed to scan operators: {}",
+                    e
+                ))),
+            )
+        },
     }
 }
 
 /// POST /api/network/register-manual - 手动注册运营商
+#[tracing::instrument(skip_all)]
 pub async fn register_operator_manual_handler(
     State(conn): State<Arc<Connection>>,
     Json(req): Json<crate::models::ManualRegisterRequest>,
@@ -2418,17 +2554,21 @@ pub async fn register_operator_manual_handler(
                 json!({}),
             )),
         ),
-        Err(e) => (
-            StatusCode::OK,
-            Json(ApiResponse::error(format!(
-                "Failed to register operator: {}",
-                e
-            ))),
-        ),
+        Err(e) => {
+            error!(%e, "手动注册运营商失败");
+            (
+                StatusCode::OK,
+                Json(ApiResponse::error(format!(
+                    "Failed to register operator: {}",
+                    e
+                ))),
+            )
+        },
     }
 }
 
 /// POST /api/network/register-auto - 自动注册运营商
+#[tracing::instrument(skip_all)]
 pub async fn register_operator_auto_handler(
     State(conn): State<Arc<Connection>>,
 ) -> (StatusCode, Json<ApiResponse<serde_json::Value>>) {
@@ -2440,17 +2580,21 @@ pub async fn register_operator_auto_handler(
                 json!({}),
             )),
         ),
-        Err(e) => (
-            StatusCode::OK,
-            Json(ApiResponse::error(format!(
-                "Failed to register automatically: {}",
-                e
-            ))),
-        ),
+        Err(e) => {
+            error!(%e, "自动注册运营商失败");
+            (
+                StatusCode::OK,
+                Json(ApiResponse::error(format!(
+                    "Failed to register automatically: {}",
+                    e
+                ))),
+            )
+        },
     }
 }
 
 /// GET /api/call/forwarding - 获取呼叫转移设置
+#[tracing::instrument(skip_all)]
 pub async fn get_call_forwarding_handler(
     State(conn): State<Arc<Connection>>,
 ) -> (
@@ -2473,6 +2617,7 @@ pub async fn get_call_forwarding_handler(
 }
 
 /// POST /api/call/forwarding - 设置呼叫转移
+#[tracing::instrument(skip_all)]
 pub async fn set_call_forwarding_handler(
     State(conn): State<Arc<Connection>>,
     Json(req): Json<crate::models::SetCallForwardingRequest>,
@@ -2486,17 +2631,21 @@ pub async fn set_call_forwarding_handler(
                 json!({}),
             )),
         ),
-        Err(e) => (
-            StatusCode::OK,
-            Json(ApiResponse::error(format!(
-                "Failed to set call forwarding: {}",
-                e
-            ))),
-        ),
+        Err(e) => {
+            error!(%e, "呼叫转移设置失败");
+            (
+                StatusCode::OK,
+                Json(ApiResponse::error(format!(
+                    "Failed to set call forwarding: {}",
+                    e
+                ))),
+            )
+        },
     }
 }
 
 /// GET /api/call/settings - 获取通话设置
+#[tracing::instrument(skip_all)]
 pub async fn get_call_settings_handler(
     State(conn): State<Arc<Connection>>,
 ) -> (
@@ -2519,6 +2668,7 @@ pub async fn get_call_settings_handler(
 }
 
 /// POST /api/call/settings - 设置通话设置
+#[tracing::instrument(skip_all)]
 pub async fn set_call_settings_handler(
     State(conn): State<Arc<Connection>>,
     Json(req): Json<crate::models::SetCallSettingRequest>,
@@ -2531,19 +2681,23 @@ pub async fn set_call_settings_handler(
                 json!({}),
             )),
         ),
-        Err(e) => (
-            StatusCode::OK,
-            Json(ApiResponse::error(format!(
-                "Failed to set call settings: {}",
-                e
-            ))),
-        ),
+        Err(e) => {
+            error!(%e, "通话设置失败");
+            (
+                StatusCode::OK,
+                Json(ApiResponse::error(format!(
+                    "Failed to set call settings: {}",
+                    e
+                ))),
+            )
+        },
     }
 }
 
 // ============ SIM 卡槽功能 ============
 
 /// GET /api/sim/slot - 获取 SIM 卡槽信息
+#[tracing::instrument(skip_all)]
 pub async fn get_sim_slot_handler(
     State(conn): State<Arc<Connection>>,
 ) -> (
@@ -2566,25 +2720,32 @@ pub async fn get_sim_slot_handler(
 }
 
 /// POST /api/sim/slot/switch - 切换 SIM 卡槽
+#[tracing::instrument(skip_all)]
 pub async fn switch_sim_slot_handler(
     State(conn): State<Arc<Connection>>,
     Json(req): Json<crate::models::SwitchSimSlotRequest>,
 ) -> (StatusCode, Json<ApiResponse<serde_json::Value>>) {
     match crate::dbus::switch_sim_slot(&conn, req.slot).await {
-        Ok(response) => (
-            StatusCode::OK,
-            Json(ApiResponse::success_with_message(
-                format!("Switched to SIM slot {}", req.slot),
-                json!({"response": response}),
-            )),
-        ),
-        Err(e) => (
-            StatusCode::OK,
-            Json(ApiResponse::error(format!(
-                "Failed to switch SIM slot: {}",
-                e
-            ))),
-        ),
+        Ok(response) => {
+            info!(slot = req.slot, "SIM 卡槽切换成功");
+            (
+                StatusCode::OK,
+                Json(ApiResponse::success_with_message(
+                    format!("Switched to SIM slot {}", req.slot),
+                    json!({"response": response}),
+                )),
+            )
+        }
+        Err(e) => {
+            error!(slot = req.slot, %e, "SIM 卡槽切换失败");
+            (
+                StatusCode::OK,
+                Json(ApiResponse::error(format!(
+                    "Failed to switch SIM slot: {}",
+                    e
+                ))),
+            )
+        }
     }
 }
 
@@ -2593,6 +2754,7 @@ pub async fn switch_sim_slot_handler(
 /// GET /api/apn - 获取 APN 列表
 ///
 /// 返回所有 internet 类型的 APN context 配置
+#[tracing::instrument(skip_all)]
 pub async fn get_apn_list_handler(
     State(conn): State<Arc<Connection>>,
 ) -> (StatusCode, Json<ApiResponse<ApnListResponse>>) {
@@ -2624,6 +2786,7 @@ pub async fn get_apn_list_handler(
 ///   "auth_method": "chap"
 /// }
 /// ```
+#[tracing::instrument(skip_all)]
 pub async fn set_apn_handler(
     State(conn): State<Arc<Connection>>,
     Json(req): Json<SetApnRequest>,
@@ -2677,16 +2840,20 @@ pub async fn set_apn_handler(
                 ),
             }
         }
-        Err(e) => (
-            StatusCode::OK,
-            Json(ApiResponse::error(format!("Failed to set APN: {}", e))),
-        ),
+        Err(e) => {
+            error!(%e, "APN 配置失败");
+            (
+                StatusCode::OK,
+                Json(ApiResponse::error(format!("Failed to set APN: {}", e))),
+            )
+        },
     }
 }
 
 /// GET /api/connectivity - 联网检测
 ///
 /// 通过 ping 检测 IPv4 和 IPv6 连通性
+#[tracing::instrument(skip_all)]
 pub async fn get_connectivity_check() -> (StatusCode, Json<ApiResponse<ConnectivityCheckResponse>>)
 {
     // ping 是阻塞子进程（每个 -W2 最多 ~2s，两次最多 ~4s），放 blocking 线程池，
@@ -2803,6 +2970,7 @@ use crate::sms_push::SmsPushSender;
 use crate::webhook::WebhookSender;
 
 /// GET /api/call/history - 获取通话记录
+#[tracing::instrument(skip_all)]
 pub async fn get_call_history_handler(
     State(db): State<Arc<Database>>,
     Query(params): Query<crate::models::CallHistoryRequest>,
@@ -2835,6 +3003,7 @@ pub async fn get_call_history_handler(
 }
 
 /// DELETE /api/call/history/{id} - 删除单条通话记录
+#[tracing::instrument(skip_all)]
 pub async fn delete_call_history_handler(
     State(db): State<Arc<Database>>,
     axum::extract::Path(id): axum::extract::Path<i64>,
@@ -2858,6 +3027,7 @@ pub async fn delete_call_history_handler(
 }
 
 /// POST /api/call/history/clear - 清空所有通话记录
+#[tracing::instrument(skip_all)]
 pub async fn clear_call_history_handler(
     State(db): State<Arc<Database>>,
 ) -> (StatusCode, Json<ApiResponse<serde_json::Value>>) {
@@ -2869,19 +3039,23 @@ pub async fn clear_call_history_handler(
                 json!({}),
             )),
         ),
-        Err(e) => (
-            StatusCode::OK,
-            Json(ApiResponse::error(format!(
-                "Failed to clear call history: {}",
-                e
-            ))),
-        ),
+        Err(e) => {
+            error!(%e, "清除通话记录失败");
+            (
+                StatusCode::OK,
+                Json(ApiResponse::error(format!(
+                    "Failed to clear call history: {}",
+                    e
+                ))),
+            )
+        },
     }
 }
 
 // ============ init.sh 管理 API ============
 
 /// GET /api/init-script - Get init.sh content and loader hook status.
+#[tracing::instrument(skip_all)]
 pub async fn get_init_script_handler() -> (
     StatusCode,
     Json<ApiResponse<crate::models::InitScriptResponse>>,
@@ -2901,6 +3075,7 @@ pub async fn get_init_script_handler() -> (
 }
 
 /// POST /api/init-script - Save init.sh content and ensure loader.sh calls it.
+#[tracing::instrument(skip_all)]
 pub async fn set_init_script_handler(
     Json(req): Json<crate::models::SetInitScriptRequest>,
 ) -> (
@@ -2912,18 +3087,22 @@ pub async fn set_init_script_handler(
             StatusCode::OK,
             Json(ApiResponse::success_with_message("init.sh updated", script)),
         ),
-        Err(e) => (
-            StatusCode::OK,
-            Json(ApiResponse::<crate::models::InitScriptResponse>::error(
-                format!("Failed to update init script: {}", e),
-            )),
-        ),
+        Err(e) => {
+            error!(%e, "初始化脚本更新失败");
+            (
+                StatusCode::OK,
+                Json(ApiResponse::<crate::models::InitScriptResponse>::error(
+                    format!("Failed to update init script: {}", e),
+                )),
+            )
+        },
     }
 }
 
 // ============ Webhook 配置 API ============
 
 /// GET /api/webhook/config - 获取 Webhook 配置
+#[tracing::instrument(skip_all)]
 pub async fn get_webhook_config_handler(
     State(config_manager): State<Arc<ConfigManager>>,
 ) -> (StatusCode, Json<ApiResponse<crate::config::WebhookConfig>>) {
@@ -2935,6 +3114,7 @@ pub async fn get_webhook_config_handler(
 }
 
 /// POST /api/webhook/config - 设置 Webhook 配置
+#[tracing::instrument(skip_all)]
 pub async fn set_webhook_config_handler(
     State(config_manager): State<Arc<ConfigManager>>,
     Json(webhook_config): Json<crate::config::WebhookConfig>,
@@ -2947,17 +3127,21 @@ pub async fn set_webhook_config_handler(
                 json!({}),
             )),
         ),
-        Err(e) => (
-            StatusCode::OK,
-            Json(ApiResponse::error(format!(
-                "Failed to update webhook config: {}",
-                e
-            ))),
-        ),
+        Err(e) => {
+            error!(%e, "Webhook 配置更新失败");
+            (
+                StatusCode::OK,
+                Json(ApiResponse::error(format!(
+                    "Failed to update webhook config: {}",
+                    e
+                ))),
+            )
+        },
     }
 }
 
 /// POST /api/webhook/test - 测试 Webhook 连接
+#[tracing::instrument(skip_all)]
 pub async fn test_webhook_handler(
     State(webhook_sender): State<Arc<WebhookSender>>,
 ) -> (
@@ -2989,6 +3173,7 @@ pub async fn test_webhook_handler(
 }
 
 /// GET /api/sms-push/config - 获取短信推送配置
+#[tracing::instrument(skip_all)]
 pub async fn get_sms_push_config_handler(
     State(config_manager): State<Arc<ConfigManager>>,
 ) -> (StatusCode, Json<ApiResponse<crate::config::SmsPushConfig>>) {
@@ -3000,6 +3185,7 @@ pub async fn get_sms_push_config_handler(
 }
 
 /// POST /api/sms-push/config - 设置短信推送配置
+#[tracing::instrument(skip_all)]
 pub async fn set_sms_push_config_handler(
     State(config_manager): State<Arc<ConfigManager>>,
     Json(sms_push_config): Json<crate::config::SmsPushConfig>,
@@ -3012,17 +3198,21 @@ pub async fn set_sms_push_config_handler(
                 json!({}),
             )),
         ),
-        Err(e) => (
-            StatusCode::OK,
-            Json(ApiResponse::error(format!(
-                "Failed to update SMS push config: {}",
-                e
-            ))),
-        ),
+        Err(e) => {
+            error!(%e, "SMS 推送配置更新失败");
+            (
+                StatusCode::OK,
+                Json(ApiResponse::error(format!(
+                    "Failed to update SMS push config: {}",
+                    e
+                ))),
+            )
+        },
     }
 }
 
 /// POST /api/sms-push/test - 测试短信推送连接
+#[tracing::instrument(skip_all)]
 pub async fn test_sms_push_handler(
     State(sms_push_sender): State<Arc<SmsPushSender>>,
 ) -> (
@@ -3056,6 +3246,7 @@ pub async fn test_sms_push_handler(
 // ============ OTA 更新功能 ============
 
 /// GET /api/ota/status - 获取 OTA 更新状态
+#[tracing::instrument(skip_all)]
 pub async fn get_refresh_config_handler(
     State(config_manager): State<Arc<ConfigManager>>,
     State(frontend_runtime): State<Arc<FrontendRuntime>>,
@@ -3080,6 +3271,7 @@ pub async fn get_refresh_config_handler(
     )
 }
 
+#[tracing::instrument(skip_all)]
 pub async fn set_refresh_config_handler(
     State(config_manager): State<Arc<ConfigManager>>,
     State(frontend_runtime): State<Arc<FrontendRuntime>>,
@@ -3110,16 +3302,20 @@ pub async fn set_refresh_config_handler(
                 )),
             )
         }
-        Err(error) => (
-            StatusCode::OK,
-            Json(ApiResponse::error(format!(
-                "Failed to update refresh config: {}",
-                error
-            ))),
-        ),
+        Err(error) => {
+            error!(%error, "刷新配置更新失败");
+            (
+                StatusCode::OK,
+                Json(ApiResponse::error(format!(
+                    "Failed to update refresh config: {}",
+                    error
+                ))),
+            )
+        },
     }
 }
 
+#[tracing::instrument(skip_all)]
 pub async fn frontend_refresh_heartbeat_handler(
     State(config_manager): State<Arc<ConfigManager>>,
     State(frontend_runtime): State<Arc<FrontendRuntime>>,
@@ -3146,6 +3342,7 @@ pub async fn frontend_refresh_heartbeat_handler(
     )
 }
 
+#[tracing::instrument(skip_all)]
 pub async fn get_ota_status_handler() -> impl IntoResponse {
     let status = crate::ota::get_ota_status();
     (
@@ -3155,6 +3352,7 @@ pub async fn get_ota_status_handler() -> impl IntoResponse {
 }
 
 /// POST /api/ota/upload - 上传 OTA 更新包
+#[tracing::instrument(skip_all)]
 pub async fn upload_ota_handler(body: axum::body::Bytes) -> impl IntoResponse {
     match crate::ota::handle_ota_upload(&body) {
         Ok(response) => {
@@ -3178,28 +3376,36 @@ pub async fn upload_ota_handler(body: axum::body::Bytes) -> impl IntoResponse {
 }
 
 /// POST /api/ota/apply - 应用 OTA 更新
+#[tracing::instrument(skip_all)]
 pub async fn apply_ota_handler(
     Json(req): Json<crate::models::OtaApplyRequest>,
 ) -> impl IntoResponse {
     match crate::ota::apply_ota_update(req.restart_now) {
-        Ok(message) => (
-            StatusCode::OK,
-            Json(ApiResponse::success_with_message(
-                &message,
-                json!({ "applied": true }),
-            )),
-        ),
-        Err(e) => (
-            StatusCode::OK,
-            Json(ApiResponse::<serde_json::Value>::error(format!(
-                "Failed to apply OTA update: {}",
-                e
-            ))),
-        ),
+        Ok(message) => {
+            info!(restart = req.restart_now, "OTA 更新已应用");
+            (
+                StatusCode::OK,
+                Json(ApiResponse::success_with_message(
+                    &message,
+                    json!({ "applied": true }),
+                )),
+            )
+        }
+        Err(e) => {
+            error!(%e, "应用 OTA 更新失败");
+            (
+                StatusCode::OK,
+                Json(ApiResponse::<serde_json::Value>::error(format!(
+                    "Failed to apply OTA update: {}",
+                    e
+                ))),
+            )
+        },
     }
 }
 
 /// POST /api/ota/cancel - 取消待安装的更新
+#[tracing::instrument(skip_all)]
 pub async fn cancel_ota_handler() -> impl IntoResponse {
     match crate::ota::cancel_pending_update() {
         Ok(()) => (
@@ -3209,13 +3415,16 @@ pub async fn cancel_ota_handler() -> impl IntoResponse {
                 json!({}),
             )),
         ),
-        Err(e) => (
-            StatusCode::OK,
-            Json(ApiResponse::<serde_json::Value>::error(format!(
-                "Failed to cancel update: {}",
-                e
-            ))),
-        ),
+        Err(e) => {
+            error!(%e, "取消 OTA 更新失败");
+            (
+                StatusCode::OK,
+                Json(ApiResponse::<serde_json::Value>::error(format!(
+                    "Failed to cancel update: {}",
+                    e
+                ))),
+            )
+        },
     }
 }
 
@@ -3231,6 +3440,7 @@ pub struct LogsConfigResponse {
 }
 
 /// GET /api/logs/config - 获取日志导出配置与丢弃统计
+#[tracing::instrument(skip_all)]
 pub async fn get_logs_config_handler(
     State(config_manager): State<Arc<ConfigManager>>,
     State(log_buffer): State<Arc<LogBuffer>>,
@@ -3251,6 +3461,7 @@ pub async fn get_logs_config_handler(
 }
 
 /// POST /api/logs/config - 设置日志导出配置（立即同步到缓冲/shipper）
+#[tracing::instrument(skip_all)]
 pub async fn set_logs_config_handler(
     State(config_manager): State<Arc<ConfigManager>>,
     State(log_buffer): State<Arc<LogBuffer>>,
@@ -3267,17 +3478,21 @@ pub async fn set_logs_config_handler(
                 )),
             )
         }
-        Err(e) => (
-            StatusCode::OK,
-            Json(ApiResponse::error(format!(
-                "Failed to update log export config: {}",
-                e
-            ))),
-        ),
+        Err(e) => {
+            error!(%e, "日志配置更新失败");
+            (
+                StatusCode::OK,
+                Json(ApiResponse::error(format!(
+                    "Failed to update log export config: {}",
+                    e
+                ))),
+            )
+        },
     }
 }
 
 /// GET /api/logs/stream - SSE 实时日志推流
+#[tracing::instrument(skip_all)]
 pub async fn logs_stream_handler(
     State(config_manager): State<Arc<ConfigManager>>,
     State(log_buffer): State<Arc<LogBuffer>>,
@@ -3321,6 +3536,7 @@ pub struct LogsExportQuery {
     pub format: Option<String>,
 }
 
+#[tracing::instrument(skip_all)]
 pub async fn logs_export_handler(
     State(config_manager): State<Arc<ConfigManager>>,
     State(log_buffer): State<Arc<LogBuffer>>,
@@ -3373,6 +3589,7 @@ pub async fn logs_export_handler(
 }
 
 /// POST /api/logs/test - 测试远程上报端点连通性（发送一条测试日志）
+#[tracing::instrument(skip_all)]
 pub async fn test_logs_remote_handler(
     State(config_manager): State<Arc<ConfigManager>>,
 ) -> (StatusCode, Json<ApiResponse<WebhookTestResponse>>) {
@@ -3481,6 +3698,7 @@ fn logs_test_client() -> Result<&'static reqwest::Client, String> {
 }
 
 /// POST /api/logs/clear - 清空当前缓冲日志
+#[tracing::instrument(skip_all)]
 pub async fn clear_logs_handler(
     State(log_buffer): State<Arc<LogBuffer>>,
 ) -> (StatusCode, Json<ApiResponse<serde_json::Value>>) {

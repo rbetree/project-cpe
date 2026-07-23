@@ -3,6 +3,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::Path;
 use std::process::Command;
+use tracing::{info, warn, error};
 
 const OTA_STAGING_DIR: &str = "/tmp/ota_staging";
 const OTA_BINARY_PATH: &str = "/home/root/udx710";
@@ -33,6 +34,7 @@ fn read_pending_meta() -> Option<OtaMeta> {
 }
 
 pub fn handle_ota_upload(data: &[u8]) -> Result<OtaUploadResponse, String> {
+    info!("OTA 上传开始");
     let _ = fs::remove_dir_all(OTA_STAGING_DIR);
     fs::create_dir_all(OTA_STAGING_DIR)
         .map_err(|e| format!("Failed to create staging dir: {}", e))?;
@@ -95,13 +97,17 @@ pub fn handle_ota_upload(data: &[u8]) -> Result<OtaUploadResponse, String> {
 
     let meta_path = Path::new(OTA_STAGING_DIR).join("meta.json");
     let meta_content = fs::read_to_string(&meta_path)
-        .map_err(|_| "meta.json not found in OTA package".to_string())?;
+        .map_err(|e| {
+            error!(%e, "OTA 固件文件读取失败: {}", meta_path.display());
+            "meta.json not found in OTA package".to_string()
+        })?;
 
     let meta: OtaMeta =
         serde_json::from_str(&meta_content).map_err(|e| format!("Invalid meta.json: {}", e))?;
 
     let validation = validate_ota_package(&meta)?;
 
+    info!("OTA 上传完成");
     Ok(OtaUploadResponse { meta, validation })
 }
 
@@ -110,6 +116,7 @@ fn validate_ota_package(meta: &OtaMeta) -> Result<OtaValidation, String> {
     let www_path = Path::new(OTA_STAGING_DIR).join("www");
 
     if !binary_path.exists() {
+        warn!("OTA 校验失败: 固件文件不存在: {}", binary_path.display());
         return Ok(OtaValidation {
             valid: false,
             is_newer: false,
@@ -121,6 +128,7 @@ fn validate_ota_package(meta: &OtaMeta) -> Result<OtaValidation, String> {
     }
 
     if !www_path.exists() {
+        warn!("OTA 校验失败: 前端目录不存在: {}", www_path.display());
         return Ok(OtaValidation {
             valid: false,
             is_newer: false,
@@ -143,18 +151,21 @@ fn validate_ota_package(meta: &OtaMeta) -> Result<OtaValidation, String> {
     let error = if !valid {
         let mut errors = Vec::new();
         if !binary_md5_match {
+            warn!("OTA 校验: 固件 MD5 不匹配: expected={}, actual={}", meta.binary_md5, binary_md5);
             errors.push(format!(
                 "Binary MD5 mismatch: expected={}, actual={}",
                 meta.binary_md5, binary_md5
             ));
         }
         if !frontend_md5_match {
+            warn!("OTA 校验: 前端 MD5 不匹配: expected={}, actual={}", meta.frontend_md5, frontend_md5);
             errors.push(format!(
                 "Frontend MD5 mismatch: expected={}, actual={}",
                 meta.frontend_md5, frontend_md5
             ));
         }
         if !arch_match {
+            warn!("OTA 校验: 架构不匹配: expected=aarch64, actual={}", meta.arch);
             errors.push(format!(
                 "Arch mismatch: expected=aarch64-unknown-linux-musl, actual={}",
                 meta.arch
@@ -165,6 +176,9 @@ fn validate_ota_package(meta: &OtaMeta) -> Result<OtaValidation, String> {
         None
     };
 
+    if valid {
+        info!("OTA 校验通过");
+    }
     Ok(OtaValidation {
         valid,
         is_newer,
@@ -177,7 +191,10 @@ fn validate_ota_package(meta: &OtaMeta) -> Result<OtaValidation, String> {
 
 fn calculate_file_md5(path: &Path) -> Result<String, String> {
     let mut file = fs::File::open(path)
-        .map_err(|e| format!("Failed to open file {}: {}", path.display(), e))?;
+        .map_err(|e| {
+            error!(%e, "OTA 固件文件读取失败: {}", path.display());
+            format!("Failed to open file {}: {}", path.display(), e)
+        })?;
 
     let mut contents = Vec::new();
     file.read_to_end(&mut contents)
@@ -236,12 +253,15 @@ fn compare_versions(v1: &str, v2: &str) -> bool {
 }
 
 pub fn apply_ota_update(restart_now: bool) -> Result<String, String> {
+    info!("OTA 应用开始");
     let meta = read_pending_meta().ok_or_else(|| "No pending update".to_string())?;
     let validation = validate_ota_package(&meta)?;
     if !validation.valid {
-        return Err(validation
+        let err_msg = validation
             .error
-            .unwrap_or_else(|| "OTA package validation failed".to_string()));
+            .unwrap_or_else(|| "OTA package validation failed".to_string());
+        error!("OTA 应用失败: 校验未通过: {}", err_msg);
+        return Err(err_msg);
     }
 
     let staging_binary = Path::new(OTA_STAGING_DIR).join("udx710");
@@ -257,6 +277,7 @@ pub fn apply_ota_update(restart_now: bool) -> Result<String, String> {
     let _ = fs::remove_file(&staging_tmp);
     if let Err(e) = fs::copy(&staging_binary, &staging_tmp) {
         let _ = fs::remove_file(&staging_tmp);
+        error!(%e, "OTA 应用失败: 新二进制写入失败");
         return Err(format!("Failed to stage new binary: {}", e));
     }
     if let Ok(f) = fs::File::open(&staging_tmp) {
@@ -264,6 +285,7 @@ pub fn apply_ota_update(restart_now: bool) -> Result<String, String> {
     }
     if let Err(e) = fs::rename(&staging_tmp, OTA_BINARY_PATH) {
         let _ = fs::remove_file(&staging_tmp);
+        error!(%e, "OTA 应用失败: 二进制文件替换失败");
         return Err(format!("Failed to swap new binary into place: {}", e));
     }
 
@@ -293,6 +315,7 @@ pub fn apply_ota_update(restart_now: bool) -> Result<String, String> {
         });
     }
 
+    info!("OTA 应用完成: version={}", meta.version);
     Ok(format!(
         "Update to version {} applied successfully",
         meta.version

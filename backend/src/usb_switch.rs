@@ -37,6 +37,7 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
 use std::process::Command;
+use tracing::{debug, error, info, warn};
 
 /// USB 模式配置
 #[derive(Debug, Clone)]
@@ -138,10 +139,11 @@ fn write_to_file(path: &str, content: &str) -> io::Result<()> {
 /// 用于发送 USB 模式相关的 AT 指令，如 AT+SPASENGMD
 fn send_at_command_direct(cmd: &str) -> io::Result<()> {
     if !Path::new(AT_DEVICE_PATH).exists() {
-        // AT 设备不存在，静默跳过
+        debug!(command = %cmd, "AT 设备不存在，跳过 AT 指令");
         return Ok(());
     }
     
+    debug!(command = %cmd, "发送 USB 切换 AT 指令");
     let mut file = fs::OpenOptions::new()
         .write(true)
         .open(AT_DEVICE_PATH)?;
@@ -386,160 +388,175 @@ fn wait_for_functionfs_mount() -> Result<(), String> {
 /// - macOS 可能需要更长时间识别新设备
 /// - 建议使用模式 1 (NCM) 以获得最佳兼容性
 pub fn switch_usb_mode_advanced(mode: u8) -> Result<(), String> {
-    let config = UsbModeConfig::get(mode)
-        .ok_or_else(|| format!("Invalid USB mode: {}. Valid modes: 1=NCM, 2=ECM, 3=RNDIS, 4=NCM(no ADB)", mode))?;
+    let config = match UsbModeConfig::get(mode) {
+        Some(c) => c,
+        None => {
+            let msg = format!("Invalid USB mode: {}. Valid modes: 1=NCM, 2=ECM, 3=RNDIS", mode);
+            error!(%msg, "USB 模式切换失败");
+            return Err(msg);
+        }
+    };
     
-    // **********************************************************
-    // 提前读取 UDC 名称，避免禁用后 list 为空
-    let udc_name_cached = get_udc_name();
+    info!(from = "current", to = %mode, "USB 模式切换开始");
     
-    // 热切换不写入配置文件，仅临时生效
-    // 如需永久保存，请使用 set_usb_mode_config() 函数
+    // Wrap the real work in a closure so all `?` propagate to a single error! log point.
+    let result = (|| -> Result<(), String> {
+        // 提前读取 UDC 名称，避免禁用后 list 为空
+        let udc_name_cached = get_udc_name();
+        
+        // 热切换不写入配置文件，仅临时生效
+        // 如需永久保存，请使用 set_usb_mode_config() 函数
+        
+        // 1. 停止 adbd 服务
+        let _ = stop_adbd();
+        
+        // 2. 禁用 UDC
+        write_to_file(UDC_PATH, "none")
+            .map_err(|e| format!("Failed to disable UDC: {}", e))?;
+        
+        // 等待 UDC 完全禁用
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        
+        // 3. 删除所有链接和 CDC 功能
+        remove_all_links()
+            .map_err(|e| format!("Failed to remove links: {}", e))?;
+        remove_all_cdc()
+            .map_err(|e| format!("Failed to remove CDC functions: {}", e))?;
+        
+        // 4. 设置 IPA 硬件加速协议
+        if let Some(protocol) = config.pamu3_protocol {
+            if Path::new(PAMU3_PROTOCOL_PATH).exists() {
+                write_to_file(PAMU3_PROTOCOL_PATH, protocol)
+                    .map_err(|e| format!("Failed to set pamu3_protocol: {}", e))?;
+            }
+        }
+        
+        // 5. 设置 max_dl_pkts (下行包批量数)
+        if Path::new(PAMU3_MAX_DL_PKTS_PATH).exists() {
+            let _ = write_to_file(PAMU3_MAX_DL_PKTS_PATH, "7");
+        }
+        
+        // 6. 发送 AT 指令控制 USB 共享模式
+        let _ = set_usb_share_mode(config.usb_share_enable);
+        
+        // 7. 确保 configfs 已挂载
+        let _ = Command::new("mount")
+            .args(["-t", "configfs", "none", "/sys/kernel/config"])
+            .output();
+        
+        // 8. 设置 USB gadget 基本配置
+        if !Path::new(GADGET_PATH).exists() {
+            fs::create_dir_all(GADGET_PATH)
+                .map_err(|e| format!("Failed to create gadget directory: {}", e))?;
+        }
+        
+        write_to_file(&format!("{}/idVendor", GADGET_PATH), config.vid)
+            .map_err(|e| format!("Failed to set VID: {}", e))?;
+        write_to_file(&format!("{}/idProduct", GADGET_PATH), config.pid)
+            .map_err(|e| format!("Failed to set PID: {}", e))?;
+        write_to_file(&format!("{}/bcdDevice", GADGET_PATH), config.bcd_device)
+            .map_err(|e| format!("Failed to set bcdDevice: {}", e))?;
+        write_to_file(&format!("{}/bDeviceClass", GADGET_PATH), "0")
+            .map_err(|e| format!("Failed to set bDeviceClass: {}", e))?;
+        
+        // 9. 设置字符串描述符
+        let strings_path = format!("{}/strings/0x409", GADGET_PATH);
+        if !Path::new(&strings_path).exists() {
+            fs::create_dir_all(&strings_path)
+                .map_err(|e| format!("Failed to create strings directory: {}", e))?;
+        }
+        
+        let sn = read_serial_number();
+        let product_name = generate_product_name();
+        
+        write_to_file(&format!("{}/serialnumber", strings_path), &sn)
+            .map_err(|e| format!("Failed to set serial number: {}", e))?;
+        write_to_file(&format!("{}/manufacturer", strings_path), "SOYEA")
+            .map_err(|e| format!("Failed to set manufacturer: {}", e))?;
+        write_to_file(&format!("{}/product", strings_path), &product_name)
+            .map_err(|e| format!("Failed to set product name: {}", e))?;
+        
+        // 10. 设置配置描述符
+        let config_strings_path = format!("{}/strings/0x409", CONFIG_PATH);
+        if !Path::new(&config_strings_path).exists() {
+            fs::create_dir_all(&config_strings_path)
+                .map_err(|e| format!("Failed to create config strings directory: {}", e))?;
+        }
+        
+        write_to_file(&format!("{}/configuration", config_strings_path), config.configuration)
+            .map_err(|e| format!("Failed to set configuration: {}", e))?;
+        write_to_file(&format!("{}/MaxPower", CONFIG_PATH), "500")
+            .map_err(|e| format!("Failed to set MaxPower: {}", e))?;
+        write_to_file(&format!("{}/bmAttributes", CONFIG_PATH), "0xc0")
+            .map_err(|e| format!("Failed to set bmAttributes: {}", e))?;
+        
+        // 11. 创建主功能目录
+        let function_path = format!("{}/{}", FUNCTIONS_PATH, config.functions);
+        if !Path::new(&function_path).exists() {
+            fs::create_dir_all(&function_path)
+                .map_err(|e| format!("Failed to create function {}: {}", config.functions, e))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let perms = fs::Permissions::from_mode(0o755);
+                let _ = fs::set_permissions(&function_path, perms);
+            }
+        }
+        
+        // 12. 创建 gser/vser 功能
+        create_gser_functions()
+            .map_err(|e| format!("Failed to create gser functions: {}", e))?;
+        
+        // 13. 设置 MAC 地址
+        let dev_addr_path = format!("{}/dev_addr", function_path);
+        if Path::new(&dev_addr_path).exists() {
+            let _ = write_to_file(&dev_addr_path, &USB_INTERFACE_MAC.to_lowercase());
+        }
+        let host_addr_path = format!("{}/host_addr", function_path);
+        if Path::new(&host_addr_path).exists() {
+            let mut parts: Vec<&str> = USB_INTERFACE_MAC.split(':').collect();
+            if let Some(last) = parts.last_mut() {
+                *last = "01";
+            }
+            let host_mac = parts.join(":").to_lowercase();
+            let _ = write_to_file(&host_addr_path, &host_mac);
+        }
+        
+        // 14. 创建符号链接
+        create_multi_function_links(&config)?;
+
+        // 15. 启动 adbd
+        let _ = start_adbd();
+
+        // 16. 等待 functionfs 挂载完成
+        wait_for_functionfs_mount()?;
+
+        // 17. 设置日志传输
+        let _ = set_log_transport(true);
+        
+        // 18. 启用 UDC
+        write_to_file(UDC_PATH, &udc_name_cached)
+            .map_err(|e| format!("Failed to enable UDC: {}", e))?;
+        
+        // 19. 等待 USB 设备被主机识别
+        std::thread::sleep(std::time::Duration::from_millis(1000));
+        
+        // 20. 配置网络接口
+        configure_usb_network()?;
+        
+        Ok(())
+    })();
     
-    // 1. 停止 adbd 服务
-    let _ = stop_adbd();
-    
-    // 2. 禁用 UDC
-    write_to_file(UDC_PATH, "none")
-        .map_err(|e| format!("Failed to disable UDC: {}", e))?;
-    
-    // 等待 UDC 完全禁用
-    std::thread::sleep(std::time::Duration::from_millis(100));
-    
-    // 3. 删除所有链接和 CDC 功能
-    remove_all_links()
-        .map_err(|e| format!("Failed to remove links: {}", e))?;
-    remove_all_cdc()
-        .map_err(|e| format!("Failed to remove CDC functions: {}", e))?;
-    
-    // 4. 设置 IPA 硬件加速协议
-    if let Some(protocol) = config.pamu3_protocol {
-        if Path::new(PAMU3_PROTOCOL_PATH).exists() {
-            write_to_file(PAMU3_PROTOCOL_PATH, protocol)
-                .map_err(|e| format!("Failed to set pamu3_protocol: {}", e))?;
+    match result {
+        Ok(()) => {
+            info!("USB 模式切换成功: mode={}", mode);
+            Ok(())
+        }
+        Err(e) => {
+            error!(%e, "USB 模式切换失败");
+            Err(e)
         }
     }
-    
-    // 5. 设置 max_dl_pkts (下行包批量数)
-    if Path::new(PAMU3_MAX_DL_PKTS_PATH).exists() {
-        let _ = write_to_file(PAMU3_MAX_DL_PKTS_PATH, "7");
-    }
-    
-    // 6. 发送 AT 指令控制 USB 共享模式
-    let _ = set_usb_share_mode(config.usb_share_enable);
-    
-    // 7. 确保 configfs 已挂载
-    let _ = Command::new("mount")
-        .args(["-t", "configfs", "none", "/sys/kernel/config"])
-        .output();
-    
-    // 8. 设置 USB gadget 基本配置
-    // 确保目录存在
-    if !Path::new(GADGET_PATH).exists() {
-        fs::create_dir_all(GADGET_PATH)
-            .map_err(|e| format!("Failed to create gadget directory: {}", e))?;
-    }
-    
-    write_to_file(&format!("{}/idVendor", GADGET_PATH), config.vid)
-        .map_err(|e| format!("Failed to set VID: {}", e))?;
-    write_to_file(&format!("{}/idProduct", GADGET_PATH), config.pid)
-        .map_err(|e| format!("Failed to set PID: {}", e))?;
-    write_to_file(&format!("{}/bcdDevice", GADGET_PATH), config.bcd_device)
-        .map_err(|e| format!("Failed to set bcdDevice: {}", e))?;
-    write_to_file(&format!("{}/bDeviceClass", GADGET_PATH), "0")
-        .map_err(|e| format!("Failed to set bDeviceClass: {}", e))?;
-    
-    // 9. 设置字符串描述符
-    let strings_path = format!("{}/strings/0x409", GADGET_PATH);
-    if !Path::new(&strings_path).exists() {
-        fs::create_dir_all(&strings_path)
-            .map_err(|e| format!("Failed to create strings directory: {}", e))?;
-    }
-    
-    let sn = read_serial_number();
-    let product_name = generate_product_name();
-    
-    write_to_file(&format!("{}/serialnumber", strings_path), &sn)
-        .map_err(|e| format!("Failed to set serial number: {}", e))?;
-    write_to_file(&format!("{}/manufacturer", strings_path), "SOYEA")
-        .map_err(|e| format!("Failed to set manufacturer: {}", e))?;
-    write_to_file(&format!("{}/product", strings_path), &product_name)
-        .map_err(|e| format!("Failed to set product name: {}", e))?;
-    
-    // 10. 设置配置描述符
-    let config_strings_path = format!("{}/strings/0x409", CONFIG_PATH);
-    if !Path::new(&config_strings_path).exists() {
-        fs::create_dir_all(&config_strings_path)
-            .map_err(|e| format!("Failed to create config strings directory: {}", e))?;
-    }
-    
-    write_to_file(&format!("{}/configuration", config_strings_path), config.configuration)
-        .map_err(|e| format!("Failed to set configuration: {}", e))?;
-    write_to_file(&format!("{}/MaxPower", CONFIG_PATH), "500")
-        .map_err(|e| format!("Failed to set MaxPower: {}", e))?;
-    write_to_file(&format!("{}/bmAttributes", CONFIG_PATH), "0xc0")
-        .map_err(|e| format!("Failed to set bmAttributes: {}", e))?;
-    
-    // 11. 创建主功能目录
-    let function_path = format!("{}/{}", FUNCTIONS_PATH, config.functions);
-    if !Path::new(&function_path).exists() {
-        fs::create_dir_all(&function_path)
-            .map_err(|e| format!("Failed to create function {}: {}", config.functions, e))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let perms = fs::Permissions::from_mode(0o755);
-            let _ = fs::set_permissions(&function_path, perms);
-        }
-    }
-    
-    // 12. 创建 gser/vser 功能
-    create_gser_functions()
-        .map_err(|e| format!("Failed to create gser functions: {}", e))?;
-    
-    // 13. 设置 MAC 地址
-    let dev_addr_path = format!("{}/dev_addr", function_path);
-    if Path::new(&dev_addr_path).exists() {
-        let _ = write_to_file(&dev_addr_path, &USB_INTERFACE_MAC.to_lowercase());
-    }
-    // 设置 host_addr 以保证 RNDIS/NCM 正常枚举
-    let host_addr_path = format!("{}/host_addr", function_path);
-    if Path::new(&host_addr_path).exists() {
-        // 为 host MAC 生成 01 后缀
-        let mut parts: Vec<&str> = USB_INTERFACE_MAC.split(':').collect();
-        if let Some(last) = parts.last_mut() {
-            *last = "01";
-        }
-        let host_mac = parts.join(":").to_lowercase();
-        let _ = write_to_file(&host_addr_path, &host_mac);
-    }
-    
-    // 14. 创建符号链接（始终使用多功能模式，包含 ADB 和调试接口）
-    create_multi_function_links(&config)?;
-
-    // 15. 启动 adbd（始终启动）
-    // adbd-init 会挂载 functionfs 到 /dev/usb-ffs/adb
-    let _ = start_adbd();
-
-    // 16. 等待 functionfs 挂载完成
-    // adbd-init 是后台启动的，需要等待 functionfs 挂载完成后才能启用 UDC
-    wait_for_functionfs_mount()?;
-
-    // 17. 设置日志传输
-    let _ = set_log_transport(true);
-    
-    // 18. 启用 UDC
-    // 使用之前缓存的 UDC 名称写回，避免读取为空导致挂载失败
-    write_to_file(UDC_PATH, &udc_name_cached)
-        .map_err(|e| format!("Failed to enable UDC: {}", e))?;
-    
-    // 19. 等待 USB 设备被主机识别
-    std::thread::sleep(std::time::Duration::from_millis(1000));
-    
-    // 20. 配置网络接口
-    configure_usb_network()?;
-    
-    Ok(())
 }
 
 /// 创建多功能模式的符号链接
@@ -751,7 +768,9 @@ const USB_MODE_TEMPORARY_FILE: &str = "/mnt/data/mode_tmp.cfg";
 pub fn set_usb_mode_config(mode: u8, permanent: bool) -> Result<(), String> {
     // 验证模式值
     if !(1..=3).contains(&mode) {
-        return Err(format!("Invalid USB mode: {}. Valid modes: 1=NCM, 2=ECM, 3=RNDIS", mode));
+        let msg = format!("Invalid USB mode: {}. Valid modes: 1=NCM, 2=ECM, 3=RNDIS", mode);
+        error!(%msg, "设置 USB 模式配置文件失败");
+        return Err(msg);
     }
     
     let config_file = if permanent {
@@ -760,9 +779,13 @@ pub fn set_usb_mode_config(mode: u8, permanent: bool) -> Result<(), String> {
         USB_MODE_TEMPORARY_FILE
     };
     
+    info!(mode = mode, permanent = permanent, config_file = %config_file, "写入 USB 模式配置文件");
+    
     // 写入配置文件（末尾添加换行符，与 echo 'x' > file 行为一致）
-    fs::write(config_file, format!("{}\n", mode))
-        .map_err(|e| format!("Failed to write USB mode config to {}: {}", config_file, e))?;
+    if let Err(e) = fs::write(config_file, format!("{}\n", mode)) {
+        error!(%e, config_file = %config_file, "写入 USB 模式配置文件失败");
+        return Err(format!("Failed to write USB mode config to {}: {}", config_file, e));
+    }
     
     Ok(())
 }
@@ -774,7 +797,10 @@ pub fn set_usb_mode_config(mode: u8, permanent: bool) -> Result<(), String> {
 pub fn get_usb_mode_config() -> Result<UsbModeConfigResult, String> {
     // 1. 从 configfs 读取当前硬件实际运行的模式
     let current_hardware_mode = match get_current_usb_mode() {
-        Ok(result) => Some(result.mode),
+        Ok(result) => {
+            debug!(mode = result.mode, "查询到当前 USB 硬件模式");
+            Some(result.mode)
+        }
         Err(_) => None,
     };
     
@@ -789,6 +815,11 @@ pub fn get_usb_mode_config() -> Result<UsbModeConfigResult, String> {
         .ok()
         .and_then(|s| s.trim().parse::<u8>().ok())
         .filter(|&m| (1..=3).contains(&m));
+    
+    debug!(
+        ?current_hardware_mode, ?permanent_mode, ?temporary_mode,
+        "USB 模式配置读取结果"
+    );
     
     Ok(UsbModeConfigResult {
         current_mode: current_hardware_mode,
@@ -824,6 +855,8 @@ pub fn get_current_usb_mode() -> Result<UsbModeResult, String> {
         .trim()
         .to_lowercase();
 
+    debug!(%vid, %pid, "查询当前 USB 模式");
+
     // 根据 VID:PID 判断模式
     match (vid.as_str(), pid.as_str()) {
         ("0x1782", "0x4040") => Ok(UsbModeResult { mode: 1 }), // NCM
@@ -840,13 +873,18 @@ pub fn get_current_usb_mode() -> Result<UsbModeResult, String> {
         ("0x1782", "0x4102") => Ok(UsbModeResult { mode: 2 }), // ECM3
         ("0x1782", "0x4100") => Ok(UsbModeResult { mode: 2 }), // ECM4
         _ => {
+            warn!(%vid, %pid, "无法识别的 USB VID:PID，尝试从配置文件读取");
             // 如果无法识别，尝试从配置文件读取
             fs::read_to_string("/mnt/data/mode.cfg")
                 .ok()
                 .and_then(|s| s.trim().parse::<u8>().ok())
                 .filter(|&m| (1..=3).contains(&m))
                 .map(|mode| UsbModeResult { mode })
-                .ok_or_else(|| format!("Unknown USB mode (VID={}, PID={})", vid, pid))
+                .ok_or_else(|| {
+                    let msg = format!("Unknown USB mode (VID={}, PID={})", vid, pid);
+                    error!(%vid, %pid, "查询 USB 模式失败");
+                    msg
+                })
         }
     }
 }

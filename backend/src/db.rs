@@ -17,6 +17,7 @@ use rusqlite::{params, Connection, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use tracing::{info, warn, error};
 
 /// 短信记录
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,9 +72,12 @@ impl Database {
         // 打开失败（/data 只读/满/损坏）时退化为内存 DB，保住 HTTP/D-Bus 控制面。
         // 代价：SMS/通话历史不持久化（重启丢失）。避免因 DB 打不开导致整个服务起不来。
         let conn = match Connection::open(&db_path) {
-            Ok(c) => c,
+            Ok(c) => {
+                info!("ROCKS DB 已打开: {}", db_path.display());
+                c
+            }
             Err(e) => {
-                tracing::warn!(error = %e, path = ?db_path, "打开持久化 data.db 失败，退化为内存 DB（历史将不持久化）");
+                warn!(error = %e, path = ?db_path, "打开持久化 data.db 失败，退化为内存 DB（历史将不持久化）");
                 Connection::open_in_memory()?
             }
         };
@@ -130,6 +134,7 @@ impl Database {
             [],
         )?;
 
+        info!("DB 表迁移/创建完成");
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -153,7 +158,10 @@ impl Database {
             "INSERT INTO sms_messages (direction, phone_number, content, timestamp, status, pdu)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![direction, phone_number, content, timestamp, status, pdu],
-        )?;
+        ).map_err(|e| {
+            error!(%e, "DB 写入失败: INSERT sms_messages");
+            e
+        })?;
 
         let id = conn.last_insert_rowid();
         drop(conn);
@@ -168,7 +176,10 @@ impl Database {
         conn.execute(
             "UPDATE sms_messages SET status = ?1 WHERE id = ?2",
             params![status, id],
-        )?;
+        ).map_err(|e| {
+            error!(%e, "DB 写入失败: UPDATE sms_messages status");
+            e
+        })?;
         Ok(())
     }
 
@@ -262,24 +273,26 @@ impl Database {
     /// 删除旧短信（保留最近 N 条）
     pub fn cleanup_old_sms(&self, keep_count: i64) -> Result<usize> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        let deleted = conn.execute(
+        let deleted =         conn.execute(
             "DELETE FROM sms_messages WHERE id NOT IN (
                 SELECT id FROM sms_messages ORDER BY timestamp DESC LIMIT ?1
             )",
             params![keep_count],
         )?;
+        info!("DB 清理完成: {} 条短信记录", deleted);
         Ok(deleted)
     }
 
     /// 删除旧通话记录（保留最近 N 条）
     pub fn cleanup_old_calls(&self, keep_count: i64) -> Result<usize> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        let deleted = conn.execute(
+        let deleted =         conn.execute(
             "DELETE FROM call_history WHERE id NOT IN (
                 SELECT id FROM call_history ORDER BY start_time DESC LIMIT ?1
             )",
             params![keep_count],
         )?;
+        info!("DB 清理完成: {} 条通话记录", deleted);
         Ok(deleted)
     }
 
@@ -298,7 +311,11 @@ impl Database {
     /// 删除所有短信
     pub fn clear_all_sms(&self) -> Result<()> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        conn.execute("DELETE FROM sms_messages", [])?;
+        conn.execute("DELETE FROM sms_messages", [])
+            .map_err(|e| {
+                error!(%e, "DB 写入失败: DELETE sms_messages");
+                e
+            })?;
         Ok(())
     }
 
@@ -313,7 +330,10 @@ impl Database {
             "INSERT INTO call_history (direction, phone_number, duration, start_time, answered)
              VALUES (?1, ?2, 0, ?3, ?4)",
             params![direction, phone_number, start_time, answered as i32],
-        )?;
+        ).map_err(|e| {
+            error!(%e, "DB 写入失败: INSERT call_history");
+            e
+        })?;
 
         let id = conn.last_insert_rowid();
         drop(conn);
@@ -329,7 +349,10 @@ impl Database {
         conn.execute(
             "UPDATE call_history SET duration = ?1, end_time = ?2, answered = ?3 WHERE id = ?4",
             params![duration, end_time, answered as i32, id],
-        )?;
+        ).map_err(|e| {
+            error!(%e, "DB 写入失败: UPDATE call_history");
+            e
+        })?;
         Ok(())
     }
 
@@ -341,7 +364,10 @@ impl Database {
         conn.execute(
             "UPDATE call_history SET direction = 'missed', end_time = ?1, answered = 0 WHERE id = ?2",
             params![end_time, id],
-        )?;
+        ).map_err(|e| {
+            error!(%e, "DB 写入失败: UPDATE call_history missed");
+            e
+        })?;
         Ok(())
     }
 
@@ -454,14 +480,22 @@ impl Database {
     /// 删除单条通话记录
     pub fn delete_call(&self, id: i64) -> Result<()> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        conn.execute("DELETE FROM call_history WHERE id = ?1", params![id])?;
+        conn.execute("DELETE FROM call_history WHERE id = ?1", params![id])
+            .map_err(|e| {
+                error!(%e, "DB 写入失败: DELETE call_history");
+                e
+            })?;
         Ok(())
     }
 
     /// 删除所有通话记录
     pub fn clear_all_calls(&self) -> Result<()> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        conn.execute("DELETE FROM call_history", [])?;
+        conn.execute("DELETE FROM call_history", [])
+            .map_err(|e| {
+                error!(%e, "DB 写入失败: DELETE call_history all");
+                e
+            })?;
         Ok(())
     }
 }

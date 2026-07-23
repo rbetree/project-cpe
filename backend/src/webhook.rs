@@ -18,6 +18,7 @@ use crate::db::{CallRecord, SmsMessage};
 use chrono::Utc;
 use reqwest::Client;
 use std::sync::Arc;
+use tracing::{info, warn, error};
 
 /// Webhook 发送器
 pub struct WebhookSender {
@@ -53,7 +54,16 @@ impl WebhookSender {
         // 使用模板替换变量
         let payload = render_sms_template(&config.sms_template, message);
         
-        self.send_webhook_raw(&config, &payload).await
+        match self.send_webhook_raw(&config, &payload).await {
+            Ok(()) => {
+                info!(url = %config.url, event = "sms", "Webhook 转发成功");
+                Ok(())
+            }
+            Err(e) => {
+                error!(%e, url = %config.url, "Webhook 转发失败");
+                Err(e)
+            }
+        }
     }
     
     /// 转发通话记录
@@ -67,7 +77,16 @@ impl WebhookSender {
         // 使用模板替换变量
         let payload = render_call_template(&config.call_template, call);
         
-        self.send_webhook_raw(&config, &payload).await
+        match self.send_webhook_raw(&config, &payload).await {
+            Ok(()) => {
+                info!(url = %config.url, event = "call", "Webhook 转发成功");
+                Ok(())
+            }
+            Err(e) => {
+                error!(%e, url = %config.url, "Webhook 转发失败");
+                Err(e)
+            }
+        }
     }
     
     /// 发送原始 JSON 字符串的 Webhook 请求
@@ -93,13 +112,17 @@ impl WebhookSender {
             .body(payload.to_string())
             .send()
             .await
-            .map_err(|e| format!("Failed to send webhook: {}", e))?;
+            .map_err(|e| {
+                error!(%e, url = %config.url, "Webhook 转发失败");
+                format!("Failed to send webhook: {}", e)
+            })?;
         
         if response.status().is_success() {
             Ok(())
         } else {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
+            warn!(status = %status, url = %config.url, "Webhook 响应异常");
             Err(format!("Webhook returned error status {}: {}", status, body))
         }
     }

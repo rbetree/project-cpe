@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use chrono::Utc;
+use chrono::Local;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, Notify};
@@ -53,7 +53,7 @@ fn level_u8(l: &Level) -> u8 {
 /// 单条日志记录（存储 / 广播 / 远程上报 / 导出共用）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogEntry {
-    /// ISO8601 UTC 时间戳
+    /// ISO8601 本地时间戳
     pub ts: String,
     /// 级别（ERROR/WARN/INFO/DEBUG/TRACE）
     pub level: String,
@@ -135,6 +135,7 @@ pub struct LogBuffer {
     shipping_enabled: AtomicBool,
 
     /// 实时采集级别（viewer / remote 中较宽者；事件级别 > 此值则整条丢弃）
+    /// 默认 INFO (error=1, warn=2, info=3, debug=4, trace=5)
     capture_level: AtomicU8,
 
     /// 唤醒 shipper（有新日志入 outbox 时）
@@ -329,7 +330,7 @@ where
         event.record(&mut visitor);
 
         let entry = LogEntry {
-            ts: Utc::now().to_rfc3339(),
+            ts: Local::now().to_rfc3339(),
             level: level.as_str().to_string(),
             target: event.metadata().target().to_string(),
             message: visitor.message,

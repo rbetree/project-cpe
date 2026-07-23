@@ -36,6 +36,7 @@ use std::time::Instant;
 use tower_http::cors::{CorsLayer, Any};
 use tracing::{info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
+use tracing_subscriber::fmt::time::ChronoLocal;
 use zbus::Connection;
 
 mod config;
@@ -156,7 +157,10 @@ async fn connect_system_dbus() -> Result<Connection> {
     let mut delay = std::time::Duration::from_millis(500);
     loop {
         match Connection::system().await {
-            Ok(c) => return Ok(c),
+            Ok(c) => {
+                info!("D-Bus 连接成功");
+                return Ok(c);
+            },
             Err(e) => {
                 warn!(error = %e, ?delay, "system D-Bus 暂不可用，重试");
                 tokio::time::sleep(delay).await;
@@ -201,15 +205,16 @@ async fn audit_api_request(request: Request, next: Next) -> Response {
 }
 
 fn should_audit_api_request(method: &Method, path: &str, status: StatusCode) -> bool {
+    // 所有 4xx/5xx 错误必须记录，不受路径过滤影响
+    if status.is_client_error() || status.is_server_error() {
+        return true;
+    }
+
     if method == Method::OPTIONS
         || path == "/api/logs/stream"
         || path == "/api/refresh/heartbeat"
     {
         return false;
-    }
-
-    if status.is_client_error() || status.is_server_error() {
-        return true;
     }
 
     if method != Method::GET && method != Method::HEAD {
@@ -232,7 +237,7 @@ async fn main() -> Result<()> {
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::fmt::layer()
-                .with_target(false)
+                .with_timer(ChronoLocal::rfc_3339())
                 .with_filter(
                     EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
                 ),

@@ -20,6 +20,7 @@ use crate::sms_push::SmsPushSender;
 use crate::webhook::WebhookSender;
 use futures_util::StreamExt;
 use std::sync::Arc;
+use tracing::{error, info, warn};
 use zbus::zvariant::OwnedValue;
 use zbus::{Connection, MessageStream, Proxy};
 
@@ -265,24 +266,35 @@ pub async fn start_sms_listener(
                         .map(|s| s.to_string())
                         .unwrap_or_else(|| "Unknown".to_string());
 
+                    info!(from = %sender, len = content.len(), "收到短信");
+
                     // Store to database
-                    if let Ok(id) = db.insert_sms("incoming", &sender, &content, "received", None) {
-                        // Forward to webhook / SMS push
-                        let sms = SmsMessage {
-                            id,
-                            direction: "incoming".to_string(),
-                            phone_number: sender,
-                            content,
-                            timestamp: chrono::Utc::now().to_rfc3339(),
-                            status: "received".to_string(),
-                            pdu: None,
-                        };
-                        let webhook_clone = Arc::clone(&webhook);
-                        let sms_push_clone = Arc::clone(&sms_push);
-                        tokio::spawn(async move {
-                            let _ = webhook_clone.forward_sms(&sms).await;
-                            let _ = sms_push_clone.forward_sms(&sms).await;
-                        });
+                    match db.insert_sms("incoming", &sender, &content, "received", None) {
+                        Ok(id) => {
+                            // Forward to webhook / SMS push
+                            let sms = SmsMessage {
+                                id,
+                                direction: "incoming".to_string(),
+                                phone_number: sender,
+                                content,
+                                timestamp: chrono::Utc::now().to_rfc3339(),
+                                status: "received".to_string(),
+                                pdu: None,
+                            };
+                            let webhook_clone = Arc::clone(&webhook);
+                            let sms_push_clone = Arc::clone(&sms_push);
+                            tokio::spawn(async move {
+                                if let Err(e) = webhook_clone.forward_sms(&sms).await {
+                                    error!(%e, "短信 Webhook 转发失败");
+                                }
+                                if let Err(e) = sms_push_clone.forward_sms(&sms).await {
+                                    error!(%e, "短信 Push 转发失败");
+                                }
+                            });
+                        }
+                        Err(e) => {
+                            error!(%e, "短信存储失败");
+                        }
                     }
                 }
             }
@@ -386,6 +398,8 @@ pub async fn start_call_listener(
                             "outgoing"
                         };
 
+                        info!(caller = %phone_number, state = %state, "收到来电");
+
                         // Insert call record into database
                         let answered = state == "active";
                         if let Ok(db_id) = db.insert_call(direction, &phone_number, answered) {
@@ -412,6 +426,7 @@ pub async fn start_call_listener(
                         let mut active_calls =
                             ACTIVE_CALLS.lock().unwrap_or_else(|e| e.into_inner());
                         if let Some(call) = active_calls.remove(&path_str) {
+                            info!("通话结束");
                             // Calculate duration
                             let duration = (Utc::now() - call.start_time).num_seconds();
                             let end_time = Utc::now().to_rfc3339();
@@ -496,10 +511,11 @@ pub async fn run_sms_listener_with_reconnect(
         let conn = match Connection::system().await {
             Ok(c) => {
                 connect_delay = initial_delay;
+                info!("SMS D-Bus 监听已启动");
                 c
             }
             Err(e) => {
-                tracing::warn!(error = %e, ?connect_delay, "SMS listener: D-Bus 不可用，重试");
+                warn!(error = %e, ?connect_delay, "SMS listener: D-Bus 不可用，重试");
                 tokio::time::sleep(connect_delay).await;
                 connect_delay = (connect_delay * 2).min(max_delay);
                 continue;
@@ -514,8 +530,8 @@ pub async fn run_sms_listener_with_reconnect(
         )
         .await
         {
-            Ok(()) => tracing::warn!("SMS listener 流结束，重连"),
-            Err(e) => tracing::warn!(error = %e, "SMS listener 错误，重连"),
+            Ok(()) => warn!("SMS listener 流结束，重连"),
+            Err(e) => warn!(error = %e, "SMS listener 错误，重连"),
         }
         if started_at.elapsed() >= std::time::Duration::from_secs(60) {
             restart_delay = initial_delay;
@@ -535,10 +551,11 @@ pub async fn run_call_listener_with_reconnect(db: Arc<Database>, webhook: Arc<We
         let conn = match Connection::system().await {
             Ok(c) => {
                 connect_delay = initial_delay;
+                info!("通话 D-Bus 监听已启动");
                 c
             }
             Err(e) => {
-                tracing::warn!(error = %e, ?connect_delay, "Call listener: D-Bus 不可用，重试");
+                warn!(error = %e, ?connect_delay, "Call listener: D-Bus 不可用，重试");
                 tokio::time::sleep(connect_delay).await;
                 connect_delay = (connect_delay * 2).min(max_delay);
                 continue;
@@ -546,8 +563,8 @@ pub async fn run_call_listener_with_reconnect(db: Arc<Database>, webhook: Arc<We
         };
         let started_at = std::time::Instant::now();
         match start_call_listener(conn, Arc::clone(&db), Arc::clone(&webhook)).await {
-            Ok(()) => tracing::warn!("Call listener 流结束，重连"),
-            Err(e) => tracing::warn!(error = %e, "Call listener 错误，重连"),
+            Ok(()) => warn!("Call listener 流结束，重连"),
+            Err(e) => warn!(error = %e, "Call listener 错误，重连"),
         }
         if started_at.elapsed() >= std::time::Duration::from_secs(60) {
             restart_delay = initial_delay;

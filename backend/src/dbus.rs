@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{info, warn};
+use tracing::{debug, error, info, warn};
 use zbus::{proxy, zvariant::OwnedValue, Connection, Proxy};
 
 use crate::config::ConfigManager;
@@ -192,16 +192,23 @@ where
 /// 已接入 `with_serial_timed`（15s 超时）：modem/oFona 卡住时不会无限期持有全局
 /// `DBUS_LOCK` 阻塞其它射频/数据命令。超时映射回 `zbus::Error::Failure` 以保持
 /// `zbus::Result` 返回类型（被大量 `?` 调用）。
+#[tracing::instrument(skip(conn))]
 pub async fn send_at_command(conn: &Connection, cmd: &str) -> zbus::Result<String> {
+    debug!(command = %cmd, "发送 AT 指令");
     with_serial_timed(async {
         let proxy = Proxy::new(conn, "org.ofono", "/ril_0", "org.ofono.Modem").await?;
         let result: String = proxy.call("SendAtcmd", &(cmd)).await?;
+        debug!(command = %cmd, response = %result, "AT 指令响应");
         Ok(result)
     })
     .await
     .map_err(|e| match e {
-        SerialOpError::Inner(zbe) => zbe,
+        SerialOpError::Inner(zbe) => {
+            error!(%zbe, command = %cmd, "AT 命令发送失败");
+            zbe
+        }
         SerialOpError::Timeout => {
+            error!(command = %cmd, timeout_secs = SERIAL_OP_TIMEOUT.as_secs(), "AT 命令发送超时");
             zbus::Error::Failure(format!(
                 "AT command '{}' timed out after {}s",
                 cmd,
@@ -218,8 +225,10 @@ pub async fn send_at_command(conn: &Connection, cmd: &str) -> zbus::Result<Strin
 ///
 /// # Returns
 /// 服务小区信息结构
+#[tracing::instrument(skip(conn))]
 pub async fn get_serving_cell_info(conn: &Connection) -> zbus::Result<ServingCell> {
-    with_serial(async {
+    debug!("查询服务小区信息");
+    let result = with_serial(async {
         let proxy = NetworkMonitorProxy::new(conn).await?;
         let cell_info: HashMap<String, OwnedValue> = proxy.get_serving_cell_information().await?;
 
@@ -232,7 +241,11 @@ pub async fn get_serving_cell_info(conn: &Connection) -> zbus::Result<ServingCel
         let tac = parse_u32_from_keys(&cell_info, &["TrackingAreaCode"]);
 
         Ok(ServingCell { tech, cell_id, tac })
-    }).await
+    }).await;
+    if let Err(ref e) = result {
+        error!(%e, "查询服务小区信息失败");
+    }
+    result
 }
 
 /// 查找第一个有效的 internet 类型 context 路径
@@ -245,10 +258,13 @@ pub async fn get_serving_cell_info(conn: &Connection) -> zbus::Result<ServingCel
 ///
 /// # Returns
 /// context 路径字符串
+#[tracing::instrument(skip(conn))]
 pub async fn find_internet_context(conn: &Connection) -> zbus::Result<String> {
-    let proxy = Proxy::new(conn, "org.ofono", "/ril_0", "org.ofono.ConnectionManager").await?;
-    let contexts: Vec<(zbus::zvariant::OwnedObjectPath, HashMap<String, OwnedValue>)> = 
-        proxy.call("GetContexts", &()).await?;
+    let proxy = Proxy::new(conn, "org.ofono", "/ril_0", "org.ofono.ConnectionManager").await
+        .map_err(|e| { error!(%e, "创建 ConnectionManager 代理失败"); e })?;
+        let contexts: Vec<(zbus::zvariant::OwnedObjectPath, HashMap<String, OwnedValue>)> = 
+            proxy.call("GetContexts", &()).await
+            .map_err(|e| { error!(%e, "获取 context 列表失败"); e })?;
     
     let mut first_internet_context: Option<String> = None;
     
@@ -287,10 +303,13 @@ pub async fn find_internet_context(conn: &Connection) -> zbus::Result<String> {
 ///
 /// # Returns
 /// APN Context 列表
+#[tracing::instrument(skip(conn))]
 pub async fn get_all_apn_contexts(conn: &Connection) -> zbus::Result<Vec<ApnContext>> {
-    let proxy = Proxy::new(conn, "org.ofono", "/ril_0", "org.ofono.ConnectionManager").await?;
+    let proxy = Proxy::new(conn, "org.ofono", "/ril_0", "org.ofono.ConnectionManager").await
+        .map_err(|e| { error!(%e, "创建 ConnectionManager 代理失败"); e })?;
     let contexts: Vec<(zbus::zvariant::OwnedObjectPath, HashMap<String, OwnedValue>)> = 
-        proxy.call("GetContexts", &()).await?;
+        proxy.call("GetContexts", &()).await
+        .map_err(|e| { error!(%e, "获取所有 APN context 失败"); e })?;
     
     let mut result = Vec::new();
     
@@ -351,13 +370,14 @@ pub async fn get_all_apn_contexts(conn: &Connection) -> zbus::Result<Vec<ApnCont
 ///
 /// # Returns
 /// 操作结果
+#[tracing::instrument(skip_all)]
 pub async fn set_apn_property(
     conn: &Connection, 
     context_path: &str, 
     property: &str, 
     value: &str
 ) -> zbus::Result<()> {
-    with_serial(async {
+    let result = with_serial(async {
         let proxy = ConnectionContextProxy::builder(conn)
             .path(context_path)?
             .build()
@@ -365,7 +385,11 @@ pub async fn set_apn_property(
         
         proxy.set_property(property, zbus::zvariant::Value::Str(value.into())).await?;
         Ok(())
-    }).await
+    }).await;
+    if let Err(ref e) = result {
+        error!(%e, property = %property, "设置 APN 属性失败");
+    }
+    result
 }
 
 /// 批量设置 APN 属性
@@ -381,6 +405,7 @@ pub async fn set_apn_property(
 ///
 /// # Returns
 /// 操作结果
+#[tracing::instrument(skip(conn))]
 pub async fn set_apn_properties(
     conn: &Connection,
     context_path: &str,
@@ -409,7 +434,10 @@ pub async fn set_apn_properties(
                 .path(context_path)?
                 .build()
                 .await?;
-            proxy.set_property("Active", zbus::zvariant::Value::Bool(false)).await?;
+            proxy.set_property("Active", zbus::zvariant::Value::Bool(false)).await.map_err(|e| {
+                error!(%e, context_path = %context_path, "停用 APN context 失败");
+                e
+            })?;
             Ok::<(), zbus::Error>(())
         }).await?;
         
@@ -446,7 +474,10 @@ pub async fn set_apn_properties(
                 .path(context_path)?
                 .build()
                 .await?;
-            proxy.set_property("Active", zbus::zvariant::Value::Bool(true)).await?;
+            proxy.set_property("Active", zbus::zvariant::Value::Bool(true)).await.map_err(|e| {
+                error!(%e, context_path = %context_path, "重新激活 APN context 失败");
+                e
+            })?;
             Ok::<(), zbus::Error>(())
         }).await?;
     }
@@ -462,8 +493,10 @@ pub async fn set_apn_properties(
 ///
 /// # Returns
 /// 操作结果
+#[tracing::instrument(skip(conn))]
 pub async fn set_data_connection(conn: &Connection, active: bool) -> Result<(), SerialOpError> {
-    with_serial_timed(async {
+    info!(active, "设置数据连接");
+    let result = with_serial_timed(async {
         // 自动查找有效的 internet context
         let context_path = find_internet_context(conn).await?;
 
@@ -474,7 +507,11 @@ pub async fn set_data_connection(conn: &Connection, active: bool) -> Result<(), 
         proxy.set_property("Active", zbus::zvariant::Value::Bool(active)).await?;
         Ok(())
     })
-    .await
+    .await;
+    if let Err(ref e) = result {
+        error!(%e, active, "设置数据连接失败");
+    }
+    result
 }
 
 /// 获取数据连接状态
@@ -484,22 +521,29 @@ pub async fn set_data_connection(conn: &Connection, active: bool) -> Result<(), 
 ///
 /// # Returns
 /// 数据连接是否激活
+#[tracing::instrument(skip(conn))]
 pub async fn get_data_connection_status(conn: &Connection) -> zbus::Result<bool> {
-    // 自动查找有效的 internet context
-    let context_path = find_internet_context(conn).await?;
-    
-    let proxy = ConnectionContextProxy::builder(conn)
-        .path(context_path)?
-        .build()
-        .await?;
-    let properties = proxy.get_properties().await?;
-    
-    let active = properties
-        .get("Active")
-        .and_then(|v| bool::try_from(v.clone()).ok())
-        .unwrap_or(false);
-    
-    Ok(active)
+    let result = (|| async {
+        // 自动查找有效的 internet context
+        let context_path = find_internet_context(conn).await?;
+        
+        let proxy = ConnectionContextProxy::builder(conn)
+            .path(context_path)?
+            .build()
+            .await?;
+        let properties = proxy.get_properties().await?;
+        
+        let active = properties
+            .get("Active")
+            .and_then(|v| bool::try_from(v.clone()).ok())
+            .unwrap_or(false);
+        
+        Ok(active)
+    })().await;
+    if let Err(ref e) = result {
+        error!(%e, "获取数据连接状态失败");
+    }
+    result
 }
 
 /// 获取漫游状态
@@ -509,6 +553,7 @@ pub async fn get_data_connection_status(conn: &Connection) -> zbus::Result<bool>
 ///
 /// # Returns
 /// (roaming_allowed, is_roaming) 元组
+#[tracing::instrument(skip(conn))]
 pub async fn get_roaming_status(conn: &Connection) -> zbus::Result<(bool, bool)> {
     // 获取 ConnectionManager 的 RoamingAllowed 属性
     let cm_proxy = Proxy::new(conn, "org.ofono", "/ril_0", "org.ofono.ConnectionManager").await?;
@@ -541,13 +586,19 @@ pub async fn get_roaming_status(conn: &Connection) -> zbus::Result<(bool, bool)>
 ///
 /// # Returns
 /// 操作结果
+#[tracing::instrument(skip(conn))]
 pub async fn set_roaming_allowed(conn: &Connection, allowed: bool) -> zbus::Result<()> {
-    with_serial(async {
+    info!(allowed, "设置漫游开关");
+    let result = with_serial(async {
         let proxy = Proxy::new(conn, "org.ofono", "/ril_0", "org.ofono.ConnectionManager").await?;
         let value = zbus::zvariant::Value::Bool(allowed);
         proxy.call::<_, _, ()>("SetProperty", &("RoamingAllowed", value)).await?;
         Ok(())
-    }).await
+    }).await;
+    if let Err(ref e) = result {
+        error!(%e, allowed, "设置漫游开关失败");
+    }
+    result
 }
 
 /// 初始化数据连接（程序启动时调用）
@@ -574,7 +625,8 @@ async fn read_registration_status(conn: &Connection) -> String {
 ///
 /// 安全性：**只动 Powered，不碰 Online**。飞行模式下 Powered 也保持 true，
 /// 故本函数与用户飞行模式意图不冲突；Online/射频的干预仅由 watchdog 的升级恢复路径
-/// （`try_escalate`）在“已注网但数据起不来”时处理。
+/// （`try_escalate`）在"已注网但数据起不来"时处理。
+#[tracing::instrument(skip(conn))]
 pub async fn ensure_modem_powered(conn: &Connection) -> Result<(), SerialOpError> {
     let was_off: bool = with_serial_timed::<bool, _>(async {
         let proxy = ModemProxy::new(conn).await?;
@@ -592,7 +644,11 @@ pub async fn ensure_modem_powered(conn: &Connection) -> Result<(), SerialOpError
             .await?;
         Ok(true)
     })
-    .await?;
+    .await
+    .map_err(|e| {
+        error!(%e, "Modem 上电（Powered）失败");
+        e
+    })?;
 
     if was_off {
         // 让出全局锁后等待 oFona 注册子接口，避免持锁 sleep。
@@ -613,11 +669,12 @@ pub async fn ensure_modem_powered(conn: &Connection) -> Result<(), SerialOpError
 ///
 /// # Returns
 /// 初始化结果消息
+#[tracing::instrument(skip(conn))]
 pub async fn init_data_connection(conn: &Connection) -> String {
     // 0. 确保调制解调器已上电（Powered=true）—— oFona 上电时序的前置条件。
     //    幂等，且不影响 Online/飞行模式。失败不阻断：仍尝试下游流程（Powered 可能由 oFona 维持）。
     if let Err(e) = ensure_modem_powered(conn).await {
-        warn!(error = %e, "init_data_connection: ensure_modem_powered failed");
+        error!(%e, "init_data_connection: ensure_modem_powered 失败");
     }
 
     // 1. 轮询等待网络注册（修复 H2：原为单次快照，未注网即 bail 且不重试）
@@ -816,25 +873,37 @@ impl RecoveryState {
 
 /// 设置 Modem.Online（射频上电），走带超时的串行锁。
 async fn set_modem_online(conn: &Connection, online: bool) -> Result<(), SerialOpError> {
-    with_serial_timed(async {
+    info!(online, "设置 Modem Online");
+    let result = with_serial_timed(async {
         let proxy = ModemProxy::new(conn).await?;
         proxy
             .set_property("Online", zbus::zvariant::Value::Bool(online))
             .await?;
         Ok(())
     })
-    .await
+    .await;
+    if let Err(ref e) = result {
+        error!(%e, online, "设置 Modem Online 失败");
+    }
+    result
 }
 
 /// 周期性翻转 Modem.Online（false→等待→true）以强制射频重连。
 /// 先确保 Powered=true（覆盖运行时 Powered 掉电，H1 重症场景），再 cycle Online。
 /// 两次 set 之间让出全局锁，避免持锁 sleep。
 async fn cycle_online(conn: &Connection) -> Result<(), SerialOpError> {
-    ensure_modem_powered(conn).await?;
-    set_modem_online(conn, false).await?;
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    set_modem_online(conn, true).await?;
-    Ok(())
+    info!("开始射频重连（cycle Online）");
+    let result = (|| async {
+        ensure_modem_powered(conn).await?;
+        set_modem_online(conn, false).await?;
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        set_modem_online(conn, true).await?;
+        Ok(())
+    })().await;
+    if let Err(ref e) = result {
+        error!(%e, "射频重连（cycle Online）失败");
+    }
+    result
 }
 
 /// 升级恢复：连续失败达阈值且冷却已过时，cycle Online 强制射频重连。
@@ -976,6 +1045,7 @@ async fn check_and_restore_data_connection(conn: &Connection, recovery: &mut Rec
 /// # Arguments
 /// * `conn` - D-Bus 连接
 /// * `interval_secs` - 检查间隔（秒）
+#[tracing::instrument(skip(conn, config_manager, frontend_runtime))]
 pub async fn data_connection_watchdog(
     conn: Arc<Connection>,
     config_manager: Arc<ConfigManager>,
@@ -1045,6 +1115,7 @@ pub async fn data_connection_watchdog(
 ///
 /// # Returns
 /// SIM 卡信息结构（整合 SimManager + MessageManager）
+#[tracing::instrument(skip(conn))]
 pub async fn get_sim_info_data(conn: &Connection) -> zbus::Result<SimInfoResponse> {
     let sim_proxy = SimManagerProxy::new(conn).await?;
     let msg_proxy = MessageManagerProxy::new(conn).await?;
@@ -1125,6 +1196,7 @@ pub async fn get_sim_info_data(conn: &Connection) -> zbus::Result<SimInfoRespons
 ///
 /// # Returns
 /// 网络信息结构
+#[tracing::instrument(skip(conn))]
 pub async fn get_network_info_data(conn: &Connection) -> zbus::Result<NetworkInfoResponse> {
     let net_proxy = NetworkRegistrationProxy::new(conn).await?;
     let radio_proxy = RadioSettingsProxy::new(conn).await?;
@@ -1177,6 +1249,7 @@ pub async fn get_network_info_data(conn: &Connection) -> zbus::Result<NetworkInf
 ///
 /// # Returns
 /// 设备信息结构
+#[tracing::instrument(skip(conn))]
 pub async fn get_device_info_data(conn: &Connection) -> zbus::Result<DeviceInfoResponse> {
     let proxy = ModemProxy::new(conn).await?;
     let props = proxy.get_properties().await?;
@@ -1227,6 +1300,7 @@ pub async fn get_device_info_data(conn: &Connection) -> zbus::Result<DeviceInfoR
 ///
 /// # Returns
 /// QoS信息结构
+#[tracing::instrument(skip(conn))]
 pub async fn get_qos_info_data(conn: &Connection) -> zbus::Result<QosInfoResponse> {
     let response = send_at_command(conn, "AT+CGEQOSRDP").await?;
     
@@ -1322,11 +1396,17 @@ fn parse_u32_from_keys(cell_info: &HashMap<String, OwnedValue>, keys: &[&str]) -
 /// 飞行模式通过设置 Modem 的 Online 属性实现：
 /// - Online = false: 关闭射频，进入飞行模式（但 Modem 保持上电）
 /// - Online = true: 开启射频，退出飞行模式
+#[tracing::instrument(skip(conn))]
 pub async fn set_airplane_mode(conn: &Connection, enabled: bool) -> Result<(), SerialOpError> {
     // 飞行模式：设置 Online 为相反值
     // enabled=true 表示开启飞行模式，即 Online=false
     // 复用 set_modem_online（带超时的串行锁，修复 H3）
-    set_modem_online(conn, !enabled).await
+    info!(enabled, "设置飞行模式");
+    let result = set_modem_online(conn, !enabled).await;
+    if let Err(ref e) = result {
+        error!(%e, enabled, "设置飞行模式失败");
+    }
+    result
 }
 
 /// 获取飞行模式状态
@@ -1340,6 +1420,7 @@ pub async fn set_airplane_mode(conn: &Connection, enabled: bool) -> Result<(), S
 /// # 说明
 /// 飞行模式状态判断：
 /// - enabled = !Online (Online=false 表示飞行模式已启用)
+#[tracing::instrument(skip(conn))]
 pub async fn get_airplane_mode(conn: &Connection) -> zbus::Result<AirplaneModeResponse> {
     let proxy = ModemProxy::new(conn).await?;
     let props = proxy.get_properties().await?;
@@ -1374,8 +1455,9 @@ pub async fn get_airplane_mode(conn: &Connection) -> zbus::Result<AirplaneModeRe
 ///
 /// # 说明
 /// 通过 RadioSettings.GetProperties 获取 TechnologyPreference 属性
+#[tracing::instrument(skip(conn))]
 pub async fn get_radio_mode(conn: &Connection) -> zbus::Result<RadioModeResponse> {
-    with_serial(async {
+    let result = with_serial(async {
         let proxy = RadioSettingsProxy::new(conn).await?;
         let props = proxy.get_properties().await?;
         
@@ -1398,7 +1480,11 @@ pub async fn get_radio_mode(conn: &Connection) -> zbus::Result<RadioModeResponse
             mode,
             technology_preference,
         })
-    }).await
+    }).await;
+    if let Err(ref e) = result {
+        error!(%e, "获取射频模式失败");
+    }
+    result
 }
 
 /// 设置射频模式
@@ -1412,8 +1498,10 @@ pub async fn get_radio_mode(conn: &Connection) -> zbus::Result<RadioModeResponse
 ///
 /// # 说明
 /// 通过 RadioSettings.SetProperty 设置 TechnologyPreference 属性
+#[tracing::instrument(skip(conn))]
 pub async fn set_radio_mode(conn: &Connection, mode: RadioMode) -> zbus::Result<()> {
-    with_serial(async {
+    info!(?mode, "设置射频模式");
+    let result = with_serial(async {
         let proxy = RadioSettingsProxy::new(conn).await?;
         let ofono_value = mode.to_ofono_value();
         
@@ -1425,7 +1513,11 @@ pub async fn set_radio_mode(conn: &Connection, mode: RadioMode) -> zbus::Result<
             .await?;
         
         Ok(())
-    }).await
+    }).await;
+    if let Err(ref e) = result {
+        error!(%e, ?mode, "设置射频模式失败");
+    }
+    result
 }
 
 // ============ 电话相关 D-Bus 接口 ============
@@ -1468,8 +1560,9 @@ pub trait VoiceCall {
 }
 
 /// 获取当前活动的通话列表
+#[tracing::instrument(skip(conn))]
 pub async fn get_active_calls(conn: &Connection) -> zbus::Result<Vec<CallInfo>> {
-    with_serial(async {
+    let result = with_serial(async {
         let proxy = VoiceCallManagerProxy::new(conn).await?;
         let calls = proxy.get_calls().await?;
         
@@ -1506,12 +1599,18 @@ pub async fn get_active_calls(conn: &Connection) -> zbus::Result<Vec<CallInfo>> 
         }
         
         Ok(result)
-    }).await
+    }).await;
+    if let Err(ref e) = result {
+        error!(%e, "获取活动通话列表失败");
+    }
+    result
 }
 
 /// 拨打电话
+#[tracing::instrument(skip(conn))]
 pub async fn dial_call(conn: &Connection, phone_number: &str) -> zbus::Result<CallInfo> {
-    with_serial(async {
+    info!(number = %phone_number, "拨打电话");
+    let result = with_serial(async {
         let proxy = VoiceCallManagerProxy::new(conn).await?;
         let path = proxy.dial(phone_number, "default").await?;
         
@@ -1522,24 +1621,36 @@ pub async fn dial_call(conn: &Connection, phone_number: &str) -> zbus::Result<Ca
             direction: "outgoing".to_string(),
             start_time: Some(chrono::Utc::now().to_rfc3339()),
         })
-    }).await
+    }).await;
+    match &result {
+        Ok(_) => info!(number = %phone_number, "拨打电话成功"),
+        Err(e) => error!(%e, number = %phone_number, "拨打电话失败"),
+    }
+    result
 }
 
 /// 挂断指定通话
+#[tracing::instrument(skip(conn))]
 pub async fn hangup_call(conn: &Connection, call_path: &str) -> zbus::Result<()> {
-    with_serial(async {
+    info!(call_path = %call_path, "挂断通话");
+    let result = with_serial(async {
         let proxy = VoiceCallProxy::builder(conn)
             .path(call_path)?
             .build()
             .await?;
         
         proxy.hangup().await
-    }).await
+    }).await;
+    if let Err(ref e) = result {
+        error!(%e, call_path = %call_path, "挂断通话失败");
+    }
+    result
 }
 
 /// 挂断所有通话
+#[tracing::instrument(skip(conn))]
 pub async fn hangup_all_calls(conn: &Connection) -> zbus::Result<usize> {
-    with_serial(async {
+    let result = with_serial(async {
         let proxy = VoiceCallManagerProxy::new(conn).await?;
         let calls = proxy.get_calls().await?;
         let count = calls.len();
@@ -1549,30 +1660,49 @@ pub async fn hangup_all_calls(conn: &Connection) -> zbus::Result<usize> {
         }
         
         Ok(count)
-    }).await
+    }).await;
+    match &result {
+        Ok(count) => info!(count, "挂断所有通话成功"),
+        Err(e) => error!(%e, "挂断所有通话失败"),
+    }
+    result
 }
 
 /// 接听来电
+#[tracing::instrument(skip(conn))]
 pub async fn answer_call(conn: &Connection, call_path: &str) -> zbus::Result<()> {
-    with_serial(async {
+    info!(call_path = %call_path, "接听来电");
+    let result = with_serial(async {
         let proxy = VoiceCallProxy::builder(conn)
             .path(call_path)?
             .build()
             .await?;
         
         proxy.answer().await
-    }).await
+    }).await;
+    match &result {
+        Ok(_) => info!("接听来电成功"),
+        Err(e) => error!(%e, call_path = %call_path, "接听来电失败"),
+    }
+    result
 }
 
 // ============ 短信相关 D-Bus 接口 ============
 
 /// 发送短信
+#[tracing::instrument(skip(conn, content))]
 pub async fn send_sms(conn: &Connection, phone_number: &str, content: &str) -> zbus::Result<String> {
-    with_serial(async {
+    info!(to = %phone_number, len = content.len(), "发送短信");
+    let result = with_serial(async {
         let proxy = Proxy::new(conn, "org.ofono", "/ril_0", "org.ofono.MessageManager").await?;
         let message_path: zbus::zvariant::OwnedObjectPath = proxy.call("SendMessage", &(phone_number, content)).await?;
         Ok(message_path.to_string())
-    }).await
+    }).await;
+    match &result {
+        Ok(path) => info!(to = %phone_number, path = %path, "发送短信成功"),
+        Err(e) => error!(%e, to = %phone_number, "发送短信失败"),
+    }
+    result
 }
 
 // ============ 新增功能接口 ============
@@ -1584,8 +1714,9 @@ use crate::models::{
 };
 
 /// 获取 IMEISV（软件版本号）
+#[tracing::instrument(skip(conn))]
 pub async fn get_imeisv(conn: &Connection) -> zbus::Result<ImeisvResponse> {
-    with_serial(async {
+    let result = with_serial(async {
         let proxy = Proxy::new(conn, "org.ofono", "/ril_0", "org.ofono.Modem").await?;
         let result: HashMap<String, OwnedValue> = proxy.call("GetImeisv", &()).await?;
         
@@ -1597,12 +1728,18 @@ pub async fn get_imeisv(conn: &Connection) -> zbus::Result<ImeisvResponse> {
         Ok(ImeisvResponse {
             software_version_number: svn,
         })
-    }).await
+    }).await;
+    if let Err(ref e) = result {
+        error!(%e, "获取 IMEISV 失败");
+    }
+    result
 }
 
 /// 获取信号强度详细信息
+#[tracing::instrument(skip(conn))]
 pub async fn get_signal_strength(conn: &Connection) -> zbus::Result<SignalStrengthResponse> {
-    with_serial(async {
+    debug!("查询信号强度");
+    let result = with_serial(async {
         let proxy = Proxy::new(conn, "org.ofono", "/ril_0", "org.ofono.NetworkRegistration").await?;
         let result: HashMap<String, OwnedValue> = proxy.call("GetSignalStrength", &()).await?;
         
@@ -1612,12 +1749,18 @@ pub async fn get_signal_strength(conn: &Connection) -> zbus::Result<SignalStreng
             .unwrap_or(0);
         
         Ok(SignalStrengthResponse { strength })
-    }).await
+    }).await;
+    match &result {
+        Ok(resp) => debug!(strength = resp.strength, "信号强度查询结果"),
+        Err(e) => error!(%e, "查询信号强度失败"),
+    }
+    result
 }
 
 /// 获取 NITZ 网络时间
+#[tracing::instrument(skip(conn))]
 pub async fn get_nitz_time(conn: &Connection) -> zbus::Result<NitzTimeResponse> {
-    with_serial(async {
+    let result = with_serial(async {
         let proxy = Proxy::new(conn, "org.ofono", "/ril_0", "org.ofono.Modem").await?;
         
         match proxy.call("GetNITZ", &()).await {
@@ -1625,17 +1768,25 @@ pub async fn get_nitz_time(conn: &Connection) -> zbus::Result<NitzTimeResponse> 
                 time_string,
                 available: true,
             }),
-            Err(_) => Ok(NitzTimeResponse {
-                time_string: String::new(),
-                available: false,
-            }),
+            Err(e) => {
+                error!(%e, "获取 NITZ 网络时间失败");
+                Ok(NitzTimeResponse {
+                    time_string: String::new(),
+                    available: false,
+                })
+            },
         }
-    }).await
+    }).await;
+    if let Err(ref e) = result {
+        error!(%e, "获取 NITZ 时间 D-Bus 调用失败");
+    }
+    result
 }
 
 /// 获取 IMS 状态
+#[tracing::instrument(skip(conn))]
 pub async fn get_ims_status(conn: &Connection) -> zbus::Result<ImsStatusResponse> {
-    with_serial(async {
+    let result = with_serial(async {
         let proxy = Proxy::new(conn, "org.ofono", "/ril_0", "org.ofono.IpMultimediaSystem").await?;
         let props: HashMap<String, OwnedValue> = proxy.call("GetProperties", &()).await?;
         
@@ -1659,12 +1810,17 @@ pub async fn get_ims_status(conn: &Connection) -> zbus::Result<ImsStatusResponse
             voice_capable,
             sms_capable,
         })
-    }).await
+    }).await;
+    if let Err(ref e) = result {
+        error!(%e, "获取 IMS 状态失败");
+    }
+    result
 }
 
 /// 获取通话音量
+#[tracing::instrument(skip(conn))]
 pub async fn get_call_volume(conn: &Connection) -> zbus::Result<CallVolumeResponse> {
-    with_serial(async {
+    let result = with_serial(async {
         let proxy = Proxy::new(conn, "org.ofono", "/ril_0", "org.ofono.CallVolume").await?;
         let props: HashMap<String, OwnedValue> = proxy.call("GetProperties", &()).await?;
         
@@ -1688,17 +1844,22 @@ pub async fn get_call_volume(conn: &Connection) -> zbus::Result<CallVolumeRespon
             microphone_volume,
             muted,
         })
-    }).await
+    }).await;
+    if let Err(ref e) = result {
+        error!(%e, "获取通话音量失败");
+    }
+    result
 }
 
 /// 设置通话音量
+#[tracing::instrument(skip(conn))]
 pub async fn set_call_volume(
     conn: &Connection,
     speaker: Option<u8>,
     microphone: Option<u8>,
     muted: Option<bool>,
 ) -> zbus::Result<()> {
-    with_serial(async {
+    let result = with_serial(async {
         let proxy = Proxy::new(conn, "org.ofono", "/ril_0", "org.ofono.CallVolume").await?;
         
         if let Some(vol) = speaker {
@@ -1717,12 +1878,18 @@ pub async fn set_call_volume(
         }
         
         Ok(())
-    }).await
+    }).await;
+    match &result {
+        Ok(_) => info!("设置通话音量成功"),
+        Err(e) => error!(%e, "设置通话音量失败"),
+    }
+    result
 }
 
 /// 获取语音留言状态
+#[tracing::instrument(skip(conn))]
 pub async fn get_voicemail_status(conn: &Connection) -> zbus::Result<VoicemailStatusResponse> {
-    with_serial(async {
+    let result = with_serial(async {
         let proxy = Proxy::new(conn, "org.ofono", "/ril_0", "org.ofono.MessageWaiting").await?;
         let props: HashMap<String, OwnedValue> = proxy.call("GetProperties", &()).await?;
         
@@ -1746,12 +1913,17 @@ pub async fn get_voicemail_status(conn: &Connection) -> zbus::Result<VoicemailSt
             message_count,
             mailbox_number,
         })
-    }).await
+    }).await;
+    if let Err(ref e) = result {
+        error!(%e, "获取语音留言状态失败");
+    }
+    result
 }
 
 /// 获取运营商列表（快速，仅返回当前）
+#[tracing::instrument(skip(conn))]
 pub async fn get_operators(conn: &Connection) -> zbus::Result<OperatorListResponse> {
-    with_serial(async {
+    let result = with_serial(async {
         let proxy = Proxy::new(conn, "org.ofono", "/ril_0", "org.ofono.NetworkRegistration").await?;
         let result: Vec<(zbus::zvariant::OwnedObjectPath, HashMap<String, OwnedValue>)> = 
             proxy.call("GetOperators", &()).await?;
@@ -1762,12 +1934,18 @@ pub async fn get_operators(conn: &Connection) -> zbus::Result<OperatorListRespon
         }
         
         Ok(OperatorListResponse { operators })
-    }).await
+    }).await;
+    if let Err(ref e) = result {
+        error!(%e, "获取运营商列表失败");
+    }
+    result
 }
 
 /// 扫描运营商（慢，返回所有可用）
+#[tracing::instrument(skip(conn))]
 pub async fn scan_operators(conn: &Connection) -> zbus::Result<OperatorListResponse> {
-    with_serial(async {
+    info!("扫描运营商网络");
+    let result = with_serial(async {
         let proxy = Proxy::new(conn, "org.ofono", "/ril_0", "org.ofono.NetworkRegistration").await?;
         let result: Vec<(zbus::zvariant::OwnedObjectPath, HashMap<String, OwnedValue>)> = 
             proxy.call("Scan", &()).await?;
@@ -1778,7 +1956,12 @@ pub async fn scan_operators(conn: &Connection) -> zbus::Result<OperatorListRespo
         }
         
         Ok(OperatorListResponse { operators })
-    }).await
+    }).await;
+    match &result {
+        Ok(resp) => info!(count = resp.operators.len(), "运营商扫描完成"),
+        Err(e) => error!(%e, "扫描运营商失败"),
+    }
+    result
 }
 
 /// 解析运营商信息
@@ -1826,24 +2009,39 @@ fn parse_operator_info(path: String, props: HashMap<String, OwnedValue>) -> Oper
 }
 
 /// 手动注册到指定运营商
+#[tracing::instrument(skip(conn))]
 pub async fn register_operator_manual(conn: &Connection, mccmnc: &str) -> zbus::Result<()> {
-    with_serial(async {
+    info!(mccmnc = %mccmnc, "手动注册运营商");
+    let result = with_serial(async {
         let proxy = Proxy::new(conn, "org.ofono", "/ril_0", "org.ofono.NetworkRegistration").await?;
         proxy.call("RegisterManually", &(mccmnc, "")).await
-    }).await
+    }).await;
+    match &result {
+        Ok(_) => info!(mccmnc = %mccmnc, "手动注册运营商成功"),
+        Err(e) => error!(%e, mccmnc = %mccmnc, "手动注册运营商失败"),
+    }
+    result
 }
 
 /// 自动注册运营商
+#[tracing::instrument(skip(conn))]
 pub async fn register_operator_auto(conn: &Connection) -> zbus::Result<()> {
-    with_serial(async {
+    info!("自动注册运营商");
+    let result = with_serial(async {
         let proxy = Proxy::new(conn, "org.ofono", "/ril_0", "org.ofono.NetworkRegistration").await?;
         proxy.call("Register", &()).await
-    }).await
+    }).await;
+    match &result {
+        Ok(_) => info!("自动注册运营商成功"),
+        Err(e) => error!(%e, "自动注册运营商失败"),
+    }
+    result
 }
 
 /// 获取呼叫转移设置
+#[tracing::instrument(skip(conn))]
 pub async fn get_call_forwarding(conn: &Connection) -> zbus::Result<CallForwardingResponse> {
-    with_serial(async {
+    let result = with_serial(async {
         let proxy = Proxy::new(conn, "org.ofono", "/ril_0", "org.ofono.CallForwarding").await?;
         let props: HashMap<String, OwnedValue> = proxy.call("GetProperties", &()).await?;
         
@@ -1885,17 +2083,23 @@ pub async fn get_call_forwarding(conn: &Connection) -> zbus::Result<CallForwardi
             voice_not_reachable,
             forwarding_flag_on_sim,
         })
-    }).await
+    }).await;
+    if let Err(ref e) = result {
+        error!(%e, "获取呼叫转移设置失败");
+    }
+    result
 }
 
 /// 设置呼叫转移
+#[tracing::instrument(skip_all)]  // skip_all: number 为电话号码 PII，避免入 span
 pub async fn set_call_forwarding(
     conn: &Connection,
     forward_type: &str,
     number: &str,
     timeout: Option<u16>,
 ) -> zbus::Result<()> {
-    with_serial(async {
+    info!(forward_type = %forward_type, number = %number, "设置呼叫转移");
+    let result = with_serial(async {
         let proxy = Proxy::new(conn, "org.ofono", "/ril_0", "org.ofono.CallForwarding").await?;
         
         let property_name = match forward_type {
@@ -1916,12 +2120,17 @@ pub async fn set_call_forwarding(
         }
         
         Ok(())
-    }).await
+    }).await;
+    if let Err(ref e) = result {
+        error!(%e, forward_type = %forward_type, "设置呼叫转移失败");
+    }
+    result
 }
 
 /// 获取通话设置
+#[tracing::instrument(skip(conn))]
 pub async fn get_call_settings(conn: &Connection) -> zbus::Result<CallSettingsResponse> {
-    with_serial(async {
+    let result = with_serial(async {
         let proxy = Proxy::new(conn, "org.ofono", "/ril_0", "org.ofono.CallSettings").await?;
         let props: HashMap<String, OwnedValue> = proxy.call("GetProperties", &()).await?;
         
@@ -1975,16 +2184,26 @@ pub async fn get_call_settings(conn: &Connection) -> zbus::Result<CallSettingsRe
             hide_caller_id,
             voice_call_waiting,
         })
-    }).await
+    }).await;
+    if let Err(ref e) = result {
+        error!(%e, "获取通话设置失败");
+    }
+    result
 }
 
 /// 设置通话设置
+#[tracing::instrument(skip_all)]
 pub async fn set_call_setting(conn: &Connection, property: &str, value: &str) -> zbus::Result<()> {
-    with_serial(async {
+    info!(property = %property, value = %value, "设置通话设置");
+    let result = with_serial(async {
         let proxy = Proxy::new(conn, "org.ofono", "/ril_0", "org.ofono.CallSettings").await?;
         let value_variant = zbus::zvariant::Value::new(value);
         proxy.call("SetProperty", &(property, value_variant)).await
-    }).await
+    }).await;
+    if let Err(ref e) = result {
+        error!(%e, property = %property, "设置通话设置失败");
+    }
+    result
 }
 
 // ============ SIM 卡槽功能 ============
@@ -1992,8 +2211,9 @@ pub async fn set_call_setting(conn: &Connection, property: &str, value: &str) ->
 use crate::models::SimSlotResponse;
 
 /// 获取 SIM 卡槽信息
+#[tracing::instrument(skip(conn))]
 pub async fn get_sim_slot(conn: &Connection) -> zbus::Result<SimSlotResponse> {
-    with_serial(async {
+    let result = with_serial(async {
         let proxy = Proxy::new(conn, "org.ofono", "/ril_0", "org.ofono.Modem").await?;
         let response: String = proxy.call("SendAtcmd", &("AT+SPCONFIGSIMSLOT?")).await?;
         
@@ -2014,12 +2234,18 @@ pub async fn get_sim_slot(conn: &Connection) -> zbus::Result<SimSlotResponse> {
             active_slot,
             raw_value,
         })
-    }).await
+    }).await;
+    if let Err(ref e) = result {
+        error!(%e, "获取 SIM 卡槽信息失败");
+    }
+    result
 }
 
 /// 切换 SIM 卡槽
+#[tracing::instrument(skip(conn))]
 pub async fn switch_sim_slot(conn: &Connection, slot: u8) -> zbus::Result<String> {
-    with_serial(async {
+    info!(slot, "切换 SIM 卡槽");
+    let result = with_serial(async {
         let proxy = Proxy::new(conn, "org.ofono", "/ril_0", "org.ofono.Modem").await?;
         
         // 根据卡槽号生成 AT 命令
@@ -2035,6 +2261,11 @@ pub async fn switch_sim_slot(conn: &Connection, slot: u8) -> zbus::Result<String
         let response: String = proxy.call("SendAtcmd", &(cmd.as_str())).await?;
         
         Ok(response)
-    }).await
+    }).await;
+    match &result {
+        Ok(_) => info!(slot, "切换 SIM 卡槽成功"),
+        Err(e) => error!(%e, slot, "切换 SIM 卡槽失败"),
+    }
+    result
 }
 

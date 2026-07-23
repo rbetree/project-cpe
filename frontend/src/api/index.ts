@@ -96,6 +96,7 @@ async function request<T>(
   })
 
   if (!response.ok) {
+    console.error(`[API] ${options.method || 'GET'} ${url} 返回错误: HTTP ${response.status}`)
     throw new Error(`HTTP error! status: ${response.status}`)
   }
 
