@@ -218,6 +218,45 @@ pub async fn send_at_command(conn: &Connection, cmd: &str) -> zbus::Result<Strin
     })
 }
 
+/// 发送 AT 指令（无锁版本）
+///
+/// 由调用方负责持锁，避免三次独立加锁。
+/// 注意：不包含超时保护，调用方应在外部 `with_serial` 中统一处理。
+#[tracing::instrument(skip(conn))]
+pub(crate) async fn send_at_command_inner(conn: &Connection, cmd: &str) -> zbus::Result<String> {
+    debug!(command = %cmd, "发送 AT 指令（无锁）");
+    let proxy = Proxy::new(conn, "org.ofono", "/ril_0", "org.ofono.Modem").await?;
+    let result: String = proxy.call("SendAtcmd", &(cmd)).await?;
+    debug!(command = %cmd, response = %result, "AT 指令响应");
+    Ok(result)
+}
+
+/// 获取服务小区信息（无锁版本）
+///
+/// 由调用方负责持锁，避免三次独立加锁。
+///
+/// # Arguments
+/// * `conn` - D-Bus 连接
+///
+/// # Returns
+/// 服务小区信息结构
+#[tracing::instrument(skip(conn))]
+pub(crate) async fn get_serving_cell_info_inner(conn: &Connection) -> zbus::Result<ServingCell> {
+    debug!("查询服务小区信息（无锁）");
+    let proxy = NetworkMonitorProxy::new(conn).await?;
+    let cell_info: HashMap<String, OwnedValue> = proxy.get_serving_cell_information().await?;
+
+    let tech = cell_info
+        .get("Technology")
+        .and_then(|v| String::try_from(v.clone()).ok())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    let cell_id = parse_u32_from_keys(&cell_info, &["NCellId", "CellId", "NRCellID"]);
+    let tac = parse_u32_from_keys(&cell_info, &["TrackingAreaCode"]);
+
+    Ok(ServingCell { tech, cell_id, tac })
+}
+
 /// 获取服务小区信息
 ///
 /// # Arguments

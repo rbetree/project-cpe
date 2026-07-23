@@ -63,11 +63,34 @@ export interface DashboardActions {
   loadData: () => Promise<void>
 }
 
+/** 快速 API（首屏可见） */
+const FAST_REQUEST_FACTORIES = [
+  () => api.getDeviceInfo(),
+  () => api.getSimInfo(),
+  () => api.getNetworkInfo(),
+  () => api.getDataStatus(),
+  () => api.getAirplaneMode(),
+  () => api.getRoamingStatus(),
+] as const
+
+const FAST_LABELS = ['设备信息', 'SIM 信息', '网络信息', '数据连接状态', '飞行模式状态', '漫游状态'] as const
+
+/** 慢速 API（AT 命令，延迟加载） */
+const SLOW_REQUEST_FACTORIES = [
+  () => api.getCellsInfo(),
+  () => api.getQosInfo(),
+  () => api.getSystemStats(),
+  () => api.getImsStatus(),
+] as const
+
+const SLOW_LABELS = ['小区信息', 'QoS 信息', '系统状态', 'IMS 状态'] as const
+
 const CONNECTIVITY_MIN_REFRESH_INTERVAL = 15_000
 const CONNECTIVITY_HIDDEN_MIN_REFRESH_INTERVAL = 60_000
 
 export function useDashboardData(refreshInterval: number, refreshKey: number) {
-  const [initialLoading, setInitialLoading] = useState(true)
+  const [fastDataReady, setFastDataReady] = useState(false)
+  const [allDataReady, setAllDataReady] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   const [deviceInfo, setDeviceInfo] = useState<DeviceInfo | null>(null)
@@ -134,112 +157,69 @@ export function useDashboardData(refreshInterval: number, refreshKey: number) {
     requestIdRef.current = requestId
     setError(null)
 
-    const extendedRequests = Promise.allSettled([api.getImsStatus(), api.getRoamingStatus()])
+    // 同时发起所有请求，但分阶段处理结果
+    const fastRequests = Promise.allSettled(FAST_REQUEST_FACTORIES.map((fn) => fn()))
+    const slowRequests = Promise.allSettled(SLOW_REQUEST_FACTORIES.map((fn) => fn()))
 
-    const baseResults = await Promise.allSettled([
-      api.getDeviceInfo(),
-      api.getSimInfo(),
-      api.getSystemStats(),
-      api.getNetworkInfo(),
-      api.getDataStatus(),
-      api.getCellsInfo(),
-      api.getQosInfo(),
-      api.getAirplaneMode(),
-    ])
+    // ── 阶段 1：处理快速数据 ──
+    const fastResults = await fastRequests
+    if (requestId !== requestIdRef.current) return
 
-    if (requestId !== requestIdRef.current) {
-      return
-    }
+    const fastErrors: string[] = []
 
-    const baseErrors: string[] = []
-
-    const deviceResult = baseResults[0]
-    if (deviceResult.status === 'fulfilled') {
-      if (deviceResult.value.data) setDeviceInfo(deviceResult.value.data)
-    } else {
-      baseErrors.push(formatRequestError('设备信息', deviceResult.reason))
-    }
-
-    const simResult = baseResults[1]
-    if (simResult.status === 'fulfilled') {
-      if (simResult.value.data) setSimInfo(simResult.value.data)
-    } else {
-      baseErrors.push(formatRequestError('SIM 信息', simResult.reason))
-    }
-
-    const statsResult = baseResults[2]
-    if (statsResult.status === 'fulfilled') {
-      if (statsResult.value.data) {
-        setSystemStats(statsResult.value.data)
-        updateSpeedHistory(statsResult.value.data)
+    for (let i = 0; i < fastResults.length; i++) {
+      const result = fastResults[i]
+      if (result.status === 'fulfilled') {
+        const data = result.value.data
+        if (!data) continue
+        switch (i) {
+          case 0: setDeviceInfo(data as DeviceInfo); break
+          case 1: setSimInfo(data as SimInfo); break
+          case 2: setNetworkInfo(data as NetworkInfo); break
+          case 3: setDataStatus((data as { active: boolean }).active); break
+          case 4: setAirplaneMode(data as AirplaneModeResponse); break
+          case 5: setRoaming(data as RoamingResponse); break
+        }
+      } else {
+        fastErrors.push(formatRequestError(FAST_LABELS[i], result.reason))
       }
-    } else {
-      baseErrors.push(formatRequestError('系统状态', statsResult.reason))
     }
 
-    const networkResult = baseResults[3]
-    if (networkResult.status === 'fulfilled') {
-      if (networkResult.value.data) setNetworkInfo(networkResult.value.data)
-    } else {
-      baseErrors.push(formatRequestError('网络信息', networkResult.reason))
+    setFastDataReady(true)
+    if (fastErrors.length > 0) {
+      setError(fastErrors[0])
     }
 
-    const dataStatusResult = baseResults[4]
-    if (dataStatusResult.status === 'fulfilled') {
-      if (dataStatusResult.value.data) setDataStatus(dataStatusResult.value.data.active)
-    } else {
-      baseErrors.push(formatRequestError('数据连接状态', dataStatusResult.reason))
+    // ── 阶段 2：处理慢速数据 ──
+    const slowResults = await slowRequests
+    if (requestId !== requestIdRef.current) return
+
+    const slowErrors: string[] = []
+
+    for (let i = 0; i < slowResults.length; i++) {
+      const result = slowResults[i]
+      if (result.status === 'fulfilled') {
+        const data = result.value.data
+        if (!data) continue
+        switch (i) {
+          case 0: setCellsInfo(data as CellsResponse); break
+          case 1: setQosInfo(data as QosInfo); break
+          case 2: {
+            const stats = data as SystemStatsResponse
+            setSystemStats(stats)
+            updateSpeedHistory(stats)
+            break
+          }
+          case 3: setImsStatus(data as ImsStatusResponse); break
+        }
+      } else {
+        slowErrors.push(formatRequestError(SLOW_LABELS[i], result.reason))
+      }
     }
 
-    const cellsResult = baseResults[5]
-    if (cellsResult.status === 'fulfilled') {
-      if (cellsResult.value.data) setCellsInfo(cellsResult.value.data)
-    } else {
-      baseErrors.push(formatRequestError('小区信息', cellsResult.reason))
-    }
-
-    const qosResult = baseResults[6]
-    if (qosResult.status === 'fulfilled') {
-      if (qosResult.value.data) setQosInfo(qosResult.value.data)
-    } else {
-      baseErrors.push(formatRequestError('QoS 信息', qosResult.reason))
-    }
-
-    const airplaneModeResult = baseResults[7]
-    if (airplaneModeResult.status === 'fulfilled') {
-      if (airplaneModeResult.value.data) setAirplaneMode(airplaneModeResult.value.data)
-    } else {
-      baseErrors.push(formatRequestError('飞行模式状态', airplaneModeResult.reason))
-    }
-
-    setInitialLoading(false)
-    if (baseErrors.length > 0) {
-      setError(baseErrors[0])
-    }
-
-    const extendedResults = await extendedRequests
-    if (requestId !== requestIdRef.current) {
-      return
-    }
-
-    const extendedErrors: string[] = []
-
-    const imsResult = extendedResults[0]
-    if (imsResult.status === 'fulfilled') {
-      if (imsResult.value.data) setImsStatus(imsResult.value.data)
-    } else {
-      extendedErrors.push(formatRequestError('IMS 状态', imsResult.reason))
-    }
-
-    const roamingResult = extendedResults[1]
-    if (roamingResult.status === 'fulfilled') {
-      if (roamingResult.value.data) setRoaming(roamingResult.value.data)
-    } else {
-      extendedErrors.push(formatRequestError('漫游状态', roamingResult.reason))
-    }
-
-    if (extendedErrors.length > 0 && baseErrors.length === 0) {
-      setError(extendedErrors[0])
+    setAllDataReady(true)
+    if (slowErrors.length > 0 && fastErrors.length === 0) {
+      setError(slowErrors[0])
     }
   }, [formatRequestError, updateSpeedHistory])
 
@@ -307,7 +287,8 @@ export function useDashboardData(refreshInterval: number, refreshKey: number) {
   })
 
   return {
-    initialLoading,
+    fastDataReady,
+    allDataReady,
     error,
     setError,
     data: {

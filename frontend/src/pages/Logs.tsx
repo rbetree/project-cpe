@@ -350,7 +350,7 @@ export default function Logs() {
                         onChange={(_, v) => update('remote_enabled', v)}
                       />
                     }
-                    label="远程上报（方向A：异步批量 POST 到外部端点）"
+                    label="远程上报"
                   />
                 </Grid>
                 <Grid size={{ xs: 12, md: 8 }}>
@@ -460,7 +460,7 @@ export default function Logs() {
                         onChange={(_, v) => update('viewer_enabled', v)}
                       />
                     }
-                    label="现场查看 / 导出（方向B：SSE 实时推流 + 下载）"
+                    label="现场查看 / 导出"
                   />
                 </Grid>
                 <Grid size={{ xs: 12, sm: 4 }}>

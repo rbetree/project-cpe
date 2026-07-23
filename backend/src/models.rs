@@ -15,7 +15,7 @@
 use serde::{Deserialize, Serialize};
 
 /// 统一的 API 响应结构
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ApiResponse<T> {
     /// 状态：ok 或 error
     pub status: String,
@@ -142,7 +142,7 @@ pub struct RoamingRequest {
 }
 
 /// 漫游状态响应
-#[derive(Debug, Serialize, Default)]
+#[derive(Debug, Clone, Serialize, Default)]
 pub struct RoamingResponse {
     /// 是否允许漫游数据
     pub roaming_allowed: bool,
@@ -240,7 +240,7 @@ pub struct NetworkInfoResponse {
 
 
 /// QoS信息响应
-#[derive(Debug, Serialize, Default)]
+#[derive(Debug, Clone, Serialize, Default)]
 pub struct QosInfoResponse {
     /// QCI等级 (Quality of Service Class Identifier)
     pub qci: u8,
@@ -801,7 +801,7 @@ pub struct NitzTimeResponse {
 // ============ IMS（VoLTE）模型 ============
 
 /// IMS 状态响应
-#[derive(Debug, Serialize, Default)]
+#[derive(Debug, Clone, Serialize, Default)]
 pub struct ImsStatusResponse {
     /// 是否已注册到 IMS
     pub registered: bool,

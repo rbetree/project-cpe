@@ -20,7 +20,7 @@ use axum::{
 };
 use futures_util::stream;
 use serde_json::json;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use tracing::{error, info, warn};
 use zbus::Connection;
 
@@ -30,9 +30,11 @@ use crate::{
     dbus::{
         get_airplane_mode, get_all_apn_contexts, get_data_connection_status, get_device_info_data,
         get_network_info_data, get_qos_info_data, get_radio_mode, get_roaming_status,
-        get_serving_cell_info, get_sim_info_data, send_at_command, set_airplane_mode,
-        set_apn_properties, set_data_connection, set_radio_mode, set_roaming_allowed,
+        get_serving_cell_info, get_serving_cell_info_inner, get_sim_info_data, send_at_command,
+        send_at_command_inner, set_airplane_mode, set_apn_properties, set_data_connection,
+        set_radio_mode, set_roaming_allowed,
     },
+    serial::with_serial,
     iptables::flush_iptables,
     log_export::{LogBuffer, LogEntry},
     models::*,
@@ -47,6 +49,21 @@ use crate::{
     },
 };
 use std::process::Command;
+use std::collections::HashMap;
+use std::time::Instant;
+
+/// 网速测量缓存：(采样时刻, 接口名 -> (累计接收字节, 累计发送字节))
+static NET_SPEED_CACHE: OnceLock<Mutex<(Instant, HashMap<String, (u64, u64)>)>> = OnceLock::new();
+
+/// QoS / IMS / 漫游 短期 TTL 缓存（3秒），减少全局锁竞争
+const CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(3);
+
+static QOS_CACHE: LazyLock<Mutex<Option<(Instant, ApiResponse<QosInfoResponse>)>>> =
+    LazyLock::new(|| Mutex::new(None));
+static IMS_CACHE: LazyLock<Mutex<Option<(Instant, ApiResponse<ImsStatusResponse>)>>> =
+    LazyLock::new(|| Mutex::new(None));
+static ROAMING_CACHE: LazyLock<Mutex<Option<(Instant, ApiResponse<RoamingResponse>)>>> =
+    LazyLock::new(|| Mutex::new(None));
 
 /// 处理 OPTIONS 请求（CORS 预检）
 #[tracing::instrument(skip_all)]
@@ -147,9 +164,10 @@ async fn fetch_neighbor_cells(
 /// ```
 #[tracing::instrument(skip_all)]
 pub async fn get_cells(State(conn): State<Arc<Connection>>) -> impl IntoResponse {
-    let result = async {
+    // 单次全局锁：三次串行操作合并为一次加锁，避免中间排队窗口
+    let result = with_serial(async {
         // 1. 获取服务小区信息（包含网络制式）
-        let serving_cell = get_serving_cell_info(&conn)
+        let serving_cell = get_serving_cell_info_inner(&conn)
             .await
             .map_err(|e| format!("Failed to get serving cell info: {}", e))?;
 
@@ -159,10 +177,18 @@ pub async fn get_cells(State(conn): State<Arc<Connection>>) -> impl IntoResponse
         let cmd_config = get_cell_command_config(tech)
             .ok_or_else(|| format!("Unsupported network type: {}", tech))?;
 
-        // 3. 顺序获取主小区和邻区信息
-        // 注意：ofono D-Bus 不支持并发 AT 指令，必须串行执行
-        let primary_cell = fetch_primary_cell(&conn, cmd_config.primary, tech).await?;
-        let neighbor_cells = fetch_neighbor_cells(&conn, cmd_config.neighbor, tech).await?;
+        // 3. 顺序获取主小区和邻区信息（无锁版本内部不再独立加锁）
+        let primary_response = send_at_command_inner(&conn, cmd_config.primary)
+            .await
+            .map_err(|e| format!("Primary cell AT command failed: {}", e))?;
+        let parsed = parse_at_response_to_2d_vec(&primary_response);
+        let primary_cell = parse_primary_cell(tech, &parsed);
+
+        let neighbor_response = send_at_command_inner(&conn, cmd_config.neighbor)
+            .await
+            .map_err(|e| format!("Neighbor cell AT command failed: {}", e))?;
+        let neighbor_parsed = parse_at_response_to_2d_vec(&neighbor_response);
+        let neighbor_cells = parse_neighbor_cells(tech, &neighbor_parsed);
 
         // 4. 合并主小区和邻区
         let mut all_cells = vec![primary_cell];
@@ -172,7 +198,7 @@ pub async fn get_cells(State(conn): State<Arc<Connection>>) -> impl IntoResponse
             serving_cell,
             cells: all_cells,
         })
-    }
+    })
     .await;
 
     match result {
@@ -325,17 +351,28 @@ pub async fn get_data_status(State(conn): State<Arc<Connection>>) -> impl IntoRe
 /// ```
 #[tracing::instrument(skip_all)]
 pub async fn get_roaming_status_handler(State(conn): State<Arc<Connection>>) -> impl IntoResponse {
+    // 缓存命中且未过期
+    {
+        let cache = ROAMING_CACHE.lock().unwrap();
+        if let Some((ts, ref resp)) = *cache {
+            if ts.elapsed() < CACHE_TTL {
+                return (StatusCode::OK, Json(resp.clone()));
+            }
+        }
+    }
     match get_roaming_status(&conn).await {
-        Ok((roaming_allowed, is_roaming)) => (
-            StatusCode::OK,
-            Json(ApiResponse::success_with_message(
+        Ok((roaming_allowed, is_roaming)) => {
+            let resp = ApiResponse::success_with_message(
                 "Success",
                 RoamingResponse {
                     roaming_allowed,
                     is_roaming,
                 },
-            )),
-        ),
+            );
+            let mut cache = ROAMING_CACHE.lock().unwrap();
+            *cache = Some((Instant::now(), resp.clone()));
+            (StatusCode::OK, Json(resp))
+        }
         Err(e) => (
             StatusCode::OK,
             Json(ApiResponse::<RoamingResponse>::error(format!(
@@ -615,11 +652,22 @@ pub async fn get_network_info(State(conn): State<Arc<Connection>>) -> impl IntoR
 /// ```
 #[tracing::instrument(skip_all)]
 pub async fn get_qos_info(State(conn): State<Arc<Connection>>) -> impl IntoResponse {
+    // 缓存命中且未过期
+    {
+        let cache = QOS_CACHE.lock().unwrap();
+        if let Some((ts, ref resp)) = *cache {
+            if ts.elapsed() < CACHE_TTL {
+                return (StatusCode::OK, Json(resp.clone()));
+            }
+        }
+    }
     match get_qos_info_data(&conn).await {
-        Ok(data) => (
-            StatusCode::OK,
-            Json(ApiResponse::success_with_message("Success", data)),
-        ),
+        Ok(data) => {
+            let resp = ApiResponse::success_with_message("Success", data);
+            let mut cache = QOS_CACHE.lock().unwrap();
+            *cache = Some((Instant::now(), resp.clone()));
+            (StatusCode::OK, Json(resp))
+        }
         Err(e) => (
             StatusCode::OK,
             Json(ApiResponse::<QosInfoResponse>::error(format!(
@@ -906,48 +954,60 @@ pub async fn get_cpu_info() -> impl IntoResponse {
 /// ```
 #[tracing::instrument(skip_all)]
 pub async fn get_system_stats() -> impl IntoResponse {
-    use std::time::{Duration, Instant};
-    use tokio::time::sleep;
-
     let result: Result<SystemStatsResponse, String> = async {
-        // 获取网速和 CPU 使用率（并行异步采样）
+        // CPU 使用率采样
+        let cpu_usage = sample_cpu_usage().await.unwrap_or(0.0);
+
+        // 网速测量：读取当前流量并基于缓存差值计算速率（不等待）
         let interfaces = get_active_interfaces()?;
-        let mut first_samples = Vec::new();
+        let mut current_stats: Vec<(String, u64, u64)> = Vec::new();
         for interface in &interfaces {
             match read_interface_stats(interface) {
-                Ok((rx, tx)) => first_samples.push((interface.clone(), rx, tx)),
+                Ok((rx, tx)) => current_stats.push((interface.clone(), rx, tx)),
                 Err(_) => continue,
             }
         }
 
-        // 同时开始 CPU 采样
-        let cpu_usage_future = sample_cpu_usage();
-
-        let start = Instant::now();
-        // 等待 1 秒采样网速（CPU 采样只需 200ms，会先完成）
-        let cpu_usage = cpu_usage_future.await.unwrap_or(0.0);
-
-        // 补足剩余时间到 1 秒
-        let elapsed_so_far = start.elapsed();
-        if elapsed_so_far < Duration::from_secs(1) {
-            sleep(Duration::from_secs(1) - elapsed_so_far).await;
-        }
-        let elapsed = start.elapsed().as_secs_f64();
-
         let mut speed_data = Vec::new();
-        for (interface, rx1, tx1) in first_samples {
-            if let Ok((rx2, tx2)) = read_interface_stats(&interface) {
-                let rx_speed = ((rx2.saturating_sub(rx1)) as f64 / elapsed) as u64;
-                let tx_speed = ((tx2.saturating_sub(tx1)) as f64 / elapsed) as u64;
+        let interval_seconds;
+
+        {
+            let cache = NET_SPEED_CACHE.get_or_init(|| {
+                Mutex::new((Instant::now(), HashMap::new()))
+            });
+            let mut guard = cache.lock().unwrap();
+            let (ref mut last_time, ref mut last_stats) = *guard;
+            let now = Instant::now();
+            let elapsed = now.duration_since(*last_time).as_secs_f64();
+            interval_seconds = elapsed;
+
+            let fresh = elapsed < 2.0;
+
+            for (interface, rx, tx) in &current_stats {
+                let (rx_speed, tx_speed) = if fresh && elapsed > 0.0 {
+                    if let Some(&(prev_rx, prev_tx)) = last_stats.get(interface) {
+                        (
+                            ((rx.saturating_sub(prev_rx)) as f64 / elapsed) as u64,
+                            ((tx.saturating_sub(prev_tx)) as f64 / elapsed) as u64,
+                        )
+                    } else {
+                        (0, 0)
+                    }
+                } else {
+                    (0, 0)
+                };
 
                 speed_data.push(NetworkSpeed {
-                    interface,
+                    interface: interface.clone(),
                     rx_bytes_per_sec: rx_speed,
                     tx_bytes_per_sec: tx_speed,
-                    total_rx_bytes: rx2,
-                    total_tx_bytes: tx2,
+                    total_rx_bytes: *rx,
+                    total_tx_bytes: *tx,
                 });
+
+                last_stats.insert(interface.clone(), (*rx, *tx));
             }
+            *last_time = now;
         }
 
         // 获取内存信息
@@ -992,7 +1052,7 @@ pub async fn get_system_stats() -> impl IntoResponse {
         Ok(SystemStatsResponse {
             network_speed: NetworkSpeedResponse {
                 interfaces: speed_data,
-                interval_seconds: elapsed,
+                interval_seconds,
             },
             memory: MemoryInfo {
                 total_bytes: total,
@@ -2398,11 +2458,22 @@ pub async fn get_ims_status_handler(
     StatusCode,
     Json<ApiResponse<crate::models::ImsStatusResponse>>,
 ) {
+    // 缓存命中且未过期
+    {
+        let cache = IMS_CACHE.lock().unwrap();
+        if let Some((ts, ref resp)) = *cache {
+            if ts.elapsed() < CACHE_TTL {
+                return (StatusCode::OK, Json(resp.clone()));
+            }
+        }
+    }
     match crate::dbus::get_ims_status(&conn).await {
-        Ok(ims) => (
-            StatusCode::OK,
-            Json(ApiResponse::success_with_message("Success", ims)),
-        ),
+        Ok(ims) => {
+            let resp = ApiResponse::success_with_message("Success", ims);
+            let mut cache = IMS_CACHE.lock().unwrap();
+            *cache = Some((Instant::now(), resp.clone()));
+            (StatusCode::OK, Json(resp))
+        }
         Err(e) => (
             StatusCode::OK,
             Json(ApiResponse::error(format!(
